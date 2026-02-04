@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
-from typing import Type
-from autojudge_base import AutoJudge, Sequence, Optional, Report, Request, LeaderboardSpec, LeaderboardBuilder, LeaderboardVerification, MeasureSpec, auto_judge_to_click_command, Leaderboard, Qrels, MinimaLlmConfig, NuggetBanks, NuggetBanksProtocol
-import click
-from pathlib import Path
-from collections import defaultdict
+from typing import Type, Sequence, Optional
+from autojudge_base import (
+    AutoJudge,
+    Report,
+    Request,
+    LeaderboardSpec,
+    LeaderboardBuilder,
+    LeaderboardVerification,
+    MeasureSpec,
+    auto_judge_to_click_command,
+    Leaderboard,
+    Qrels,
+    LlmConfigProtocol,
+    NuggetBanks,
+    NuggetBanksProtocol,
+)
 from tqdm import tqdm
-from statistics import mean
 import random
 
 
@@ -27,7 +37,7 @@ class NaiveJudge(AutoJudge):
         self,
         rag_responses: Sequence["Report"],
         rag_topics: Sequence["Request"],
-        llm_config: MinimaLlmConfig,
+        llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         **kwargs
     ) -> Optional[NuggetBanksProtocol]:
@@ -35,7 +45,7 @@ class NaiveJudge(AutoJudge):
 
     def judge(self, rag_responses: Sequence["Report"]
               , rag_topics: Sequence["Request"]
-              , llm_config: MinimaLlmConfig
+              , llm_config: LlmConfigProtocol
               , nugget_banks: Optional[NuggetBanksProtocol] = None
               , **kwargs) -> "Leaderboard":
         ret = LeaderboardBuilder(NAIVE_LEADERBOARD_SPEC)

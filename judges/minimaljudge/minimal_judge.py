@@ -16,7 +16,7 @@ Use this as a starting template for building your own modular judge.
 from typing import Iterable, Optional, Sequence, Type
 
 from autojudge_base import (
-    MinimaLlmConfig,
+    LlmConfigProtocol,
     Report,
     Request,
     Leaderboard,
@@ -27,12 +27,12 @@ from autojudge_base import (
     QrelsSpec,
     build_qrels,
     doc_id_md5,
+    NuggetBanks,
+    NuggetBanksProtocol,
 )
 from autojudge_base.nugget_data import (
-    NuggetBanks,
     NuggetBank,
     NuggetQuestion,
-    NuggetBanksProtocol,
 )
 
 
@@ -87,7 +87,7 @@ class MinimalNuggetCreator:
         self,
         rag_responses: Iterable[Report],
         rag_topics: Sequence[Request],
-        llm_config: MinimaLlmConfig,
+        llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         # Settings from workflow.yml nugget_settings
         questions_per_topic: int = 3,
@@ -137,7 +137,7 @@ class MinimalQrelsCreator:
         self,
         rag_responses: Iterable[Report],
         rag_topics: Sequence[Request],
-        llm_config: MinimaLlmConfig,
+        llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         # Settings from workflow.yml qrels_settings
         grade_range: tuple = (0, 3),
@@ -185,7 +185,7 @@ class MinimalLeaderboardJudge:
         self,
         rag_responses: Iterable[Report],
         rag_topics: Sequence[Request],
-        llm_config: MinimaLlmConfig,
+        llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         qrels: Optional[Qrels] = None,
         # Settings from workflow.yml judge_settings

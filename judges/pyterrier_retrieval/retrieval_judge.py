@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
-from typing import Type
-from autojudge_base import Report, LeaderboardSpec, LeaderboardBuilder, LeaderboardVerification, MeasureSpec, AutoJudge, auto_judge_to_click_command, Leaderboard, Qrels, Sequence, Request, Optional, MinimaLlmConfig, NuggetBanks, NuggetBanksProtocol
+from typing import Type, Sequence, Optional
+from autojudge_base import (
+    Report,
+    LeaderboardSpec,
+    LeaderboardBuilder,
+    LeaderboardVerification,
+    MeasureSpec,
+    AutoJudge,
+    auto_judge_to_click_command,
+    Leaderboard,
+    Qrels,
+    Request,
+    LlmConfigProtocol,
+    NuggetBanks,
+    NuggetBanksProtocol,
+)
 from collections import defaultdict
 from tqdm import tqdm
 from tira.third_party_integrations import ensure_pyterrier_is_loaded
@@ -38,14 +52,14 @@ class RetrievalJudge(AutoJudge):
         self,
         rag_responses: Sequence["Report"],
         rag_topics: Sequence["Request"],
-        llm_config: MinimaLlmConfig,
+        llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         **kwargs
     ) -> Optional[NuggetBanksProtocol]:
         return None
 
 
-    def judge(self, rag_responses: Sequence["Report"], rag_topics: Sequence["Request"], llm_cfg: MinimaLlmConfig, nugget_banks: Optional[NuggetBanksProtocol] = None, **kwargs) -> "Leaderboard":
+    def judge(self, rag_responses: Sequence["Report"], rag_topics: Sequence["Request"], llm_cfg: LlmConfigProtocol, nugget_banks: Optional[NuggetBanksProtocol] = None, **kwargs) -> "Leaderboard":
         ensure_pyterrier_is_loaded()
         tokeniser = pt.java.autoclass("org.terrier.indexing.tokenisation.Tokeniser").getTokeniser()
         def pt_tokenize(text):
