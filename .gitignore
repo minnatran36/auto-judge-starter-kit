@@ -4,3 +4,4 @@ test-coverage
 .coverage
 .egg-info
 .egg-info_
+out
