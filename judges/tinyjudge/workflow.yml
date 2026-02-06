@@ -1,0 +1,12 @@
+# TinyJudge workflow configuration
+# Minimal LLM-based judge that checks first-sentence relevance
+
+judge_class: "judges.tinyjudge.tiny_judge.TinyJudge"
+
+# Lifecycle flags
+create_nuggets: false
+create_qrels: false
+judge: true
+
+settings:
+  filebase: "tinyjudge"

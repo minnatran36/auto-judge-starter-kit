@@ -4,18 +4,18 @@ import pytest
 from pathlib import Path
 
 
-def test_minimaljudge_imports():
-    """Test that MinimalJudge classes can be imported."""
-    from judges.minimaljudge import (
-        MinimalNuggetCreator,
-        MinimalQrelsCreator,
-        MinimalLeaderboardJudge,
+def test_example_judge_imports():
+    """Test that CompleteExampleJudge classes can be imported."""
+    from judges.complete_example import (
+        ExampleNuggetCreator,
+        ExampleQrelsCreator,
+        ExampleLeaderboardJudge,
         MINIMAL_SPEC,
     )
 
-    assert MinimalNuggetCreator is not None
-    assert MinimalQrelsCreator is not None
-    assert MinimalLeaderboardJudge is not None
+    assert ExampleNuggetCreator is not None
+    assert ExampleQrelsCreator is not None
+    assert ExampleLeaderboardJudge is not None
     assert len(MINIMAL_SPEC.measures) == 2
 
 
@@ -31,14 +31,14 @@ def test_workflow_files_exist():
     """Test that workflow.yml files exist for all judges."""
     base = Path(__file__).parent.parent / "judges"
 
-    assert (base / "minimaljudge" / "workflow.yml").exists()
+    assert (base / "complete_example" / "workflow.yml").exists()
     assert (base / "naive" / "workflow.yml").exists()
     assert (base / "pyterrier_retrieval" / "workflow.yml").exists()
 
 
 def test_minimal_spec_measures():
     """Test MinimalJudge spec has expected measures."""
-    from judges.minimaljudge import MINIMAL_SPEC
+    from judges.complete_example import MINIMAL_SPEC
 
     measure_names = [m.name for m in MINIMAL_SPEC.measures]
     assert "SCORE" in measure_names
@@ -56,10 +56,10 @@ def test_naive_spec_measures():
 
 def test_nugget_creator_has_banks_type():
     """Test that nugget creators declare their nugget_banks_type."""
-    from judges.minimaljudge import MinimalNuggetCreator
+    from judges.complete_example import ExampleNuggetCreator
     from autojudge_base.nugget_data import NuggetBanksProtocol
 
-    creator = MinimalNuggetCreator()
+    creator = ExampleNuggetCreator()
     assert hasattr(creator, 'nugget_banks_type')
     assert issubclass(creator.nugget_banks_type, NuggetBanksProtocol.__class__) or \
            creator.nugget_banks_type is not None

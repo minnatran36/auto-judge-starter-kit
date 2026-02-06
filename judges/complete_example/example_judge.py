@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-MinimalJudge: A simple example AutoJudge implementation.
+CompleteExampleJudge: A fully-documented example AutoJudge implementation.
 
 This judge demonstrates the modular protocol pattern with three separate classes:
-- MinimalNuggetCreator: Creates nugget questions for topics
-- MinimalQrelsCreator: Creates relevance judgments
-- MinimalLeaderboardJudge: Scores responses and produces leaderboard
+- ExampleNuggetCreator: Creates nugget questions for topics
+- ExampleQrelsCreator: Creates relevance judgments
+- ExampleLeaderboardJudge: Scores responses and produces leaderboard
 
 Each class implements a single protocol, allowing flexible composition in workflow.yml.
 No LLM calls are used - all logic is deterministic based on text length and keywords.
 
-Use this as a starting template for building your own modular judge.
+Use this as a reference for building judges that use nuggets and qrels.
 """
 
-from typing import Iterable, Optional, Sequence, Type
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 
 from autojudge_base import (
     LlmConfigProtocol,
@@ -69,10 +69,10 @@ MINIMAL_QRELS_SPEC = QrelsSpec[GradeRecord](
 
 
 # =============================================================================
-# MinimalNuggetCreator - NuggetCreatorProtocol
+# ExampleNuggetCreator - NuggetCreatorProtocol
 # =============================================================================
 
-class MinimalNuggetCreator:
+class ExampleNuggetCreator:
     """
     Creates nugget questions for each topic.
 
@@ -91,20 +91,20 @@ class MinimalNuggetCreator:
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         # Settings from workflow.yml nugget_settings
         questions_per_topic: int = 3,
-        **kwargs,
+        **kwargs: Any,
     ) -> Optional[NuggetBanksProtocol]:
         """Create nugget questions for each topic."""
-        banks = []
+        banks: List[NuggetBank] = []
 
         for topic in rag_topics:
             # Create a NuggetBank for this topic
-            bank = NuggetBank(
+            bank: NuggetBank = NuggetBank(
                 query_id=topic.request_id,
                 title_query=topic.title or topic.request_id,
             )
 
             # Generate questions (in a real judge, use LLM)
-            questions = []
+            questions: List[NuggetQuestion] = []
             for i in range(questions_per_topic):
                 question = NuggetQuestion.from_lazy(
                     query_id=topic.request_id,
@@ -117,15 +117,15 @@ class MinimalNuggetCreator:
             banks.append(bank)
 
         nugget_banks = NuggetBanks.from_banks_list(banks)
-        print(f"MinimalNuggetCreator: Created nuggets for {len(banks)} topics")
+        print(f"ExampleNuggetCreator: Created nuggets for {len(banks)} topics")
         return nugget_banks
 
 
 # =============================================================================
-# MinimalQrelsCreator - QrelsCreatorProtocol
+# ExampleQrelsCreator - QrelsCreatorProtocol
 # =============================================================================
 
-class MinimalQrelsCreator:
+class ExampleQrelsCreator:
     """
     Creates relevance judgments (qrels) for responses.
 
@@ -140,12 +140,12 @@ class MinimalQrelsCreator:
         llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         # Settings from workflow.yml qrels_settings
-        grade_range: tuple = (0, 3),
+        grade_range: Tuple[int, int] = (0, 3),
         length_threshold: int = 100,
-        **kwargs,
+        **kwargs: Any,
     ) -> Optional[Qrels]:
         """Create relevance judgments for each response."""
-        grade_records = []
+        grade_records: List[GradeRecord] = []
 
         for response in rag_responses:
             topic_id = response.metadata.topic_id
@@ -165,15 +165,15 @@ class MinimalQrelsCreator:
             grade_records.append(GradeRecord(topic_id, text, grade))
 
         qrels = build_qrels(records=grade_records, spec=MINIMAL_QRELS_SPEC)
-        print(f"MinimalQrelsCreator: Created qrels for {len(grade_records)} responses")
+        print(f"ExampleQrelsCreator: Created qrels for {len(grade_records)} responses")
         return qrels
 
 
 # =============================================================================
-# MinimalLeaderboardJudge - LeaderboardJudgeProtocol
+# ExampleLeaderboardJudge - LeaderboardJudgeProtocol
 # =============================================================================
 
-class MinimalLeaderboardJudge:
+class ExampleLeaderboardJudge:
     """
     Scores responses and produces a leaderboard.
 
@@ -191,29 +191,29 @@ class MinimalLeaderboardJudge:
         # Settings from workflow.yml judge_settings
         keyword_bonus: float = 0.2,
         on_missing_evals: str = "fix_aggregate",
-        **kwargs,
+        **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
-        expected_topic_ids = [t.request_id for t in rag_topics]
-        topic_titles = {t.request_id: (t.title or "").lower() for t in rag_topics}
+        expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
+        topic_titles: Dict[str, str] = {t.request_id: (t.title or "").lower() for t in rag_topics}
 
-        builder = LeaderboardBuilder(MINIMAL_SPEC)
+        builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
 
         for response in rag_responses:
-            run_id = response.metadata.run_id
-            topic_id = response.metadata.topic_id
-            text = response.get_report_text().lower()
+            run_id: str = response.metadata.run_id
+            topic_id: str = response.metadata.topic_id
+            text: str = response.get_report_text().lower()
 
             # Base score from text length (normalize to 0-1)
-            base_score = min(len(text) / 1000.0, 1.0)
+            base_score: float = min(len(text) / 1000.0, 1.0)
 
             # Check for keywords from topic title
-            title_words = topic_titles.get(topic_id, "").split()
-            keywords_found = sum(1 for word in title_words if word in text)
-            has_keywords = keywords_found > 0
+            title_words: List[str] = topic_titles.get(topic_id, "").split()
+            keywords_found: int = sum(1 for word in title_words if word in text)
+            has_keywords: bool = keywords_found > 0
 
             # Apply keyword bonus
-            score = base_score
+            score: float = base_score
             if has_keywords:
                 score = min(score + keyword_bonus, 1.0)
 
@@ -248,7 +248,7 @@ class MinimalLeaderboardJudge:
             on_missing=on_missing_evals,
         )
 
-        print(f"MinimalLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
+        print(f"ExampleLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
         return leaderboard
 
 
@@ -264,14 +264,14 @@ class MinimalLeaderboardJudge:
 if __name__ == "__main__":
     from autojudge_base import AutoJudge, auto_judge_to_click_command
 
-    class MinimalJudgeCombined(AutoJudge):
+    class CompleteExampleJudge(AutoJudge):
         """Combined class for CLI compatibility."""
         nugget_banks_type = NuggetBanks
 
         def __init__(self):
-            self._nugget_creator = MinimalNuggetCreator()
-            self._qrels_creator = MinimalQrelsCreator()
-            self._leaderboard_judge = MinimalLeaderboardJudge()
+            self._nugget_creator = ExampleNuggetCreator()
+            self._qrels_creator = ExampleQrelsCreator()
+            self._leaderboard_judge = ExampleLeaderboardJudge()
 
         def create_nuggets(self, *args, **kwargs):
             return self._nugget_creator.create_nuggets(*args, **kwargs)
@@ -282,4 +282,4 @@ if __name__ == "__main__":
         def judge(self, *args, **kwargs):
             return self._leaderboard_judge.judge(*args, **kwargs)
 
-    auto_judge_to_click_command(MinimalJudgeCombined(), "minimal_judge")()
+    auto_judge_to_click_command(CompleteExampleJudge(), "complete_example_judge")()

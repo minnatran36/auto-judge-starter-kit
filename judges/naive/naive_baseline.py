@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-from typing import Type, Sequence, Optional
+from typing import Any, Dict, Optional, Sequence, Type
+
 from autojudge_base import (
     AutoJudge,
     Report,
@@ -35,29 +36,47 @@ class NaiveJudge(AutoJudge):
 
     def create_nuggets(
         self,
-        rag_responses: Sequence["Report"],
-        rag_topics: Sequence["Request"],
+        rag_responses: Sequence[Report],
+        rag_topics: Sequence[Request],
         llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
-        **kwargs
+        **kwargs: Any,
     ) -> Optional[NuggetBanksProtocol]:
         return None
 
-    def judge(self, rag_responses: Sequence["Report"]
-              , rag_topics: Sequence["Request"]
-              , llm_config: LlmConfigProtocol
-              , nugget_banks: Optional[NuggetBanksProtocol] = None
-              , **kwargs) -> "Leaderboard":
-        ret = LeaderboardBuilder(NAIVE_LEADERBOARD_SPEC)
+    def create_qrels(
+        self,
+        rag_responses: Sequence[Report],
+        rag_topics: Sequence[Request],
+        llm_config: LlmConfigProtocol,
+        nugget_banks: Optional[NuggetBanksProtocol] = None,
+        **kwargs: Any,
+    ) -> Optional[Qrels]:
+        return None
+
+    def judge(
+        self,
+        rag_responses: Sequence[Report],
+        rag_topics: Sequence[Request],
+        llm_config: LlmConfigProtocol,
+        nugget_banks: Optional[NuggetBanksProtocol] = None,
+        qrels: Optional[Qrels] = None,
+        **kwargs: Any,
+    ) -> Leaderboard:
+        builder: LeaderboardBuilder = LeaderboardBuilder(NAIVE_LEADERBOARD_SPEC)
 
         for rag_response in tqdm(rag_responses, "Process RAG Responses"):
-            vals = {
+            vals: Dict[str, float] = {
                 "LENGTH": len(rag_response.get_report_text().split()),
-                "RANDOM": rand(rag_response.metadata.run_id + rag_response.metadata.topic_id)
+                "RANDOM": rand(rag_response.metadata.run_id + rag_response.metadata.topic_id),
             }
-            ret.add(run_id=rag_response.metadata.run_id, topic_id=rag_response.metadata.topic_id, values=vals)
+            builder.add(
+                run_id=rag_response.metadata.run_id,
+                topic_id=rag_response.metadata.topic_id,
+                values=vals,
+            )
 
-        leaderboard = ret.build()
+        leaderboard: Leaderboard = builder.build()
         LeaderboardVerification(leaderboard, on_missing="fix_aggregate").all()
         return leaderboard
 

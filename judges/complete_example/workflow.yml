@@ -1,4 +1,4 @@
-# MinimalJudge Workflow Configuration
+# CompleteExampleJudge Workflow Configuration
 #
 # This file controls the judge's behavior and parameters.
 # See autojudge-base documentation for full workflow documentation.
@@ -14,11 +14,11 @@
 #   qrels_class:  QrelsCreatorProtocol (creates relevance judgments)
 #   judge_class:  LeaderboardJudgeProtocol (produces leaderboard)
 #
-# MinimalJudge demonstrates the modular pattern with three separate classes:
+# CompleteExampleJudge demonstrates the modular pattern with three separate classes:
 
-nugget_class: "judges.minimaljudge.minimal_judge.MinimalNuggetCreator"
-qrels_class: "judges.minimaljudge.minimal_judge.MinimalQrelsCreator"
-judge_class: "judges.minimaljudge.minimal_judge.MinimalLeaderboardJudge"
+nugget_class: "judges.complete_example.example_judge.ExampleNuggetCreator"
+qrels_class: "judges.complete_example.example_judge.ExampleQrelsCreator"
+judge_class: "judges.complete_example.example_judge.ExampleLeaderboardJudge"
 
 # =============================================================================
 # Lifecycle Flags
@@ -49,7 +49,7 @@ augment_report: false
 # Shared settings passed to all phases. Use {_name} for variant/sweep name.
 
 settings:
-  filebase: "{_name}"             # Output filename base (expands to variant name)
+  filebase: "complete_example"    # Output filename base
 
 
 # =============================================================================

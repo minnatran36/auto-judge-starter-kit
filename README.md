@@ -6,55 +6,148 @@ A forkable template repository with example AutoJudge implementations for buildi
 
 ### Installation
 
-```bash
-# Clone this repository
-git clone https://github.com/trec-autojudge/auto-judge-starterkit.git
-cd auto-judge-starterkit
+1. Fork this repository
+2. Clone
 
+```bash
 # Install autojudge-base (required dependency)
 pip install git+https://github.com/trec-auto-judge/auto-judge-base.git
 
 # Install in development mode
 pip install -e .
 
-# Or with optional dependencies
-pip install -e ".[minima-llm]"      # For LLM-based judges
+
+```
+
+**Optional Dependencies**
+
+```
+pip install -e ".[minima-llm]"      # Simple backend for LLM-based judges
 pip install -e ".[pyterrier]"       # For PyTerrier retrieval judge
 pip install -e ".[test]"            # For running tests
 ```
 
+
+
+### Implement Your Own Tiny Judge
+
+See `judges/tinyjudge/` for a complete working example. For data class documentation (`Report`, `Request`, `Leaderboard`, etc.), see [autojudge-base](https://github.com/trec-auto-judge/auto-judge-base).
+
+The core pattern:
+
+```python
+import asyncio
+from autojudge_base import Leaderboard, LeaderboardBuilder, LeaderboardSpec, MeasureSpec
+from minima_llm import MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
+
+TINY_SPEC = LeaderboardSpec(measures=(MeasureSpec("FIRST_SENTENCE_RELEVANT"),))
+
+class TinyJudge:
+    """Implements LeaderboardJudgeProtocol - just needs a judge() method."""
+
+    def judge(self, rag_responses, rag_topics, llm_config, **kwargs) -> Leaderboard:
+        backend = OpenAIMinimaLlm(llm_config)   # <-- you can use your own backend, but obtain base_url and model from the llm_config object
+        topic_titles = {t.request_id: t.title or "" for t in rag_topics}
+        builder = LeaderboardBuilder(TINY_SPEC)
+
+        for i, response in enumerate(rag_responses):
+            sentence = response.responses[0].text if response.responses else ""
+            query = topic_titles.get(response.metadata.topic_id, "")
+
+            # generate() is async, so wrap with asyncio.run()
+            resp = asyncio.run(backend.generate(MinimaLlmRequest(
+                request_id=f"q{i}",
+                messages=[
+                    {"role": "system", "content": "You are a relevance evaluator. Respond with only 1 or 0."},
+                    {"role": "user", "content": f"Is this relevant to the query?\n\nQuery: {query}\nSentence: {first_sentence}"},
+                ],
+            )))
+
+            # Parse LLM response (robust to "1", "yes", "relevant", etc.)
+            text = resp.text.strip().lower() if isinstance(resp, MinimaLlmResponse) else ""
+            relevance = 1 if (text.startswith("1") or "relevant" in text) and "not" not in text else 0
+            builder.add(
+                run_id=response.metadata.run_id,
+                topic_id=response.metadata.topic_id,
+                values={"FIRST_SENTENCE_RELEVANT": relevance},
+            )
+
+        return builder.build(expected_topic_ids=list(topic_titles.keys()), on_missing="fix_aggregate")
+```
+
+Configure in `workflow.yml`:
+```yaml
+judge_class: "judges.tinyjudge.tiny_judge.TinyJudge"
+```
+
+
+
 ### Running a Judge
 
 ```bash
-# Run the minimal judge
 auto-judge run \
-    --workflow judges/minimaljudge/workflow.yml \
-    --rag-responses /path/to/responses/ \
-    --rag-topics /path/to/topics.jsonl \
-    --out-dir ./output/
-
-# Run with a specific variant
-auto-judge run \
-    --workflow judges/minimaljudge/workflow.yml \
-    --variant strict \
+    --workflow judges/tinyjudge/workflow.yml \
     --rag-responses /path/to/responses/ \
     --rag-topics /path/to/topics.jsonl \
     --out-dir ./output/
 
 # See all options
-auto-judge run --workflow judges/minimaljudge/workflow.yml --help
+auto-judge run --workflow judges/tinyjudge/workflow.yml --help
 ```
+
+For variants, parameter sweeps, and advanced configurations, see the [workflow documentation](judges/complete_example/README.md).
+
+## LLM Configuration
+
+**Important:** Your judge must use the `llm_config` parameter passed to `judge()`. Do not hardcode endpoints or API keys.
+
+```python
+def judge(self, rag_responses, rag_topics, llm_config, **kwargs) -> Leaderboard:
+    backend = OpenAIMinimaLlm(llm_config)  # Always use the provided config
+    # ... your judge logic
+```
+
+The `llm_config` object is automatically populated from environment variables and optional config files.
+
+### Environment Variables
+
+Set these before running:
+
+```bash
+export OPENAI_BASE_URL="https://api.openai.com/v1"  # or your endpoint
+export OPENAI_MODEL="gpt-4o-mini"
+export OPENAI_API_KEY="sk-..."
+export CACHE_DIR="./cache"  # optional, enables prompt caching
+```
+
+### Config File (optional)
+
+Create `llm-config.yml`:
+
+```yaml
+base_url: "http://localhost:8000/v1"
+model: "llama-3.3-70b-instruct"
+cache_dir: "./cache"
+```
+
+Then pass it via CLI:
+
+```bash
+auto-judge run --llm-config llm-config.yml --workflow ...
+```
+
+Configuration layers: **env → yaml → cli** (each layer overrides the previous).
 
 ## Example Judges
 
-### MinimalJudge (`judges/minimaljudge/`)
+### CompleteExampleJudge (`judges/complete_example/`)
 
-A fully-documented example demonstrating the modular protocol pattern:
-- `MinimalNuggetCreator`: Creates nugget questions for topics
-- `MinimalQrelsCreator`: Creates relevance judgments
-- `MinimalLeaderboardJudge`: Scores responses and produces leaderboard
+A fully-documented example demonstrating all three protocols:
+- `ExampleNuggetCreator`: Creates nugget questions for topics
+- `ExampleQrelsCreator`: Creates relevance judgments
+- `ExampleLeaderboardJudge`: Scores responses and produces leaderboard
 
-No LLM calls - all logic is deterministic. Use this as a starting template.
+No LLM calls - all logic is deterministic. Use this as a reference for building judges that use nuggets and qrels.
 
 ### NaiveJudge (`judges/naive/`)
 
@@ -71,9 +164,9 @@ Uses PyTerrier retrieval models to score responses:
 
 Requires the `pyterrier` optional dependency.
 
-## Creating Your Own Judge
+## Creating A More Elaborate Judge
 
-1. **Copy an example**: Start from `judges/minimaljudge/` or `judges/naive/`
+1. **Copy an example**: Start from `judges/complete_example/` or `judges/naive/`
 
 2. **Implement the protocol**: Your judge class needs:
    ```python
@@ -109,8 +202,8 @@ auto-judge-starterkit/
 ├── pyproject.toml           # Dependencies and package config
 ├── README.md                # This file
 ├── judges/
-│   ├── minimaljudge/
-│   │   ├── minimal_judge.py # Modular judge implementation
+│   ├── complete_example/
+│   │   ├── example_judge.py  # Modular judge implementation
 │   │   └── workflow.yml     # Configuration
 │   ├── naive/
 │   │   ├── naive_baseline.py
@@ -124,8 +217,8 @@ auto-judge-starterkit/
 
 ## Documentation
 
-- See `judges/minimaljudge/README.md` for detailed protocol documentation
-- See the [autojudge-base](https://github.com/trec-autojudge/auto-judge-base) repository for core API docs
+- See `judges/complete_example/README.md` for detailed protocol documentation
+- See [autojudge-base](https://github.com/trec-auto-judge/auto-judge-base) for core data classes (`Report`, `Request`, `Leaderboard`, `NuggetBanks`, etc.) and protocol definitions
 
 ## License
 
