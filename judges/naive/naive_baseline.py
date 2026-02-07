@@ -77,7 +77,7 @@ class NaiveJudge(AutoJudge):
             )
 
         leaderboard: Leaderboard = builder.build()
-        LeaderboardVerification(leaderboard, on_missing="fix_aggregate").all()
+        LeaderboardVerification(leaderboard, on_missing="fix_aggregate", warn=True).all()
         return leaderboard
 
 

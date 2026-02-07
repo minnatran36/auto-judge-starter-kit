@@ -68,12 +68,12 @@ def run_workflow(
     # Add run filtering
     if runs_filter == "prio1" and dataset.prio1_runs:
         for run_id in dataset.prio1_runs:
-            cmd.extend(["--run", run_id])
+            cmd.extend(["--run", str(run_id)])
 
     # Add topic filtering
     if topics_filter == "assessed" and dataset.assessed_topics:
         for topic_id in dataset.assessed_topics:
-            cmd.extend(["--topic", topic_id])
+            cmd.extend(["--topic", str(topic_id)])
 
     cmd.extend(extra_args)
 
