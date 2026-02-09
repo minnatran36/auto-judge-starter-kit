@@ -81,6 +81,7 @@ pip install -e .
 **Optional Dependencies**
 
 ```
+pip install -e ".[all]"              # Everything below
 pip install -e ".[minima-llm]"      # Lightweight batteries-included LLM client (used by TinyJudge)
 pip install -e ".[pyterrier]"       # For PyTerrier retrieval judge
 pip install -e ".[evaluate]"        # Meta-evaluation tools (leaderboard correlation, qrel agreement)

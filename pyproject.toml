@@ -46,6 +46,9 @@ pyterrier = [
 evaluate = [
     "autojudge-evaluate>=0.1.0",
 ]
+all = [
+    "auto-judge-starterkit[minima-llm,pyterrier,evaluate,test]",
+]
 
 [project.urls]
 Homepage = "https://github.com/trec-autojudge/auto-judge-starterkit"
