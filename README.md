@@ -174,9 +174,7 @@ Uses PyTerrier retrieval models to score responses:
 
 Requires the `pyterrier` optional dependency.
 
-## Test Dataset
-
-### kiddie (`data/kiddie/`)
+## Test Dataset: kiddie (`data/kiddie/`)
 
 A small **synthetic dataset** for development and testing:
 - 5 topics with simple queries
@@ -184,7 +182,7 @@ A small **synthetic dataset** for development and testing:
 - Useful for validating workflow configurations and quick iteration
 
 ```bash
-# Test your judge against kiddie
+# Run your judge against kiddie
 auto-judge run \
     --workflow judges/naive/workflow.yml \
     --rag-responses data/kiddie/responses/ \
@@ -192,28 +190,17 @@ auto-judge run \
     --out-dir ./output/
 ```
 
-The `data/kiddie/eval/` directory contains a synthetic ground-truth leaderboard for testing meta-evaluation:
-
-```bash
-auto-judge-evaluate meta-evaluate \
-    --truth-leaderboard data/kiddie/eval/kiddie_fake.eval.ir_measures.txt \
-    --truth-format ir_measures \
-    --eval-format tot -i ./output/*eval.txt \
-    --correlation kendall --on-missing default
-```
-
-For real evaluation, obtain official TREC datasets separately.
-
 ## Running Against Multiple Datasets
 
-Use `run_all_datasets.py` to run a workflow against multiple datasets configured in a YAML file.
+Use `run_all_datasets.py` to run a workflow against multiple datasets configured in a YAML file:
 
 ```bash
-# Run against all datasets in data/datasets. 
 python run_all_datasets.py --workflow judges/naive/workflow.yml --datasets data/datasets.yml
 ```
 
 ### Dataset Configuration (`datasets.yml`)
+
+To run on more than just `kiddie`, add entries to `datasets.yml`:
 
 ```yaml
 datasets:
@@ -227,6 +214,20 @@ datasets:
       - topic-1
       - topic-2
 ```
+
+## Meta-Evaluation
+
+The `data/kiddie/eval/` directory contains a synthetic ground-truth leaderboard for testing meta-evaluation:
+
+```bash
+auto-judge-evaluate meta-evaluate \
+    --truth-leaderboard data/kiddie/eval/kiddie_fake.eval.ir_measures.txt \
+    --truth-format ir_measures \
+    --eval-format tot -i ./output/*eval.txt \
+    --correlation kendall --on-missing default
+```
+
+For real evaluation, obtain official TREC datasets separately.
 
 
 ## Creating A More Elaborate Judge
