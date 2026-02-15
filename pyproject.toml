@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-judge-starterkit"
-version = "v0.2.1"
+version = "0.2.1"
 description = "Example AutoJudge implementations for building custom judges"
 readme = "README.md"
 license = {text = "MIT"}
@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "autojudge-base>=v0.2.1",
+    "autojudge-base>=0.2.1",
     "tqdm>=4.0",
 ]
 
@@ -44,7 +44,7 @@ pyterrier = [
     "tira>=0.0.100",
 ]
 evaluate = [
-    "autojudge-evaluate>=v0.2.1",
+    "autojudge-evaluate>=0.2.1",
 ]
 all = [
     "auto-judge-starterkit[minima-llm,pyterrier,evaluate,test]",
