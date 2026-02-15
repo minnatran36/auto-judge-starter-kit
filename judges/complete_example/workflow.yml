@@ -16,9 +16,9 @@
 #
 # CompleteExampleJudge demonstrates the modular pattern with three separate classes:
 
-nugget_class: "judges.complete_example.example_judge.ExampleNuggetCreator"
-qrels_class: "judges.complete_example.example_judge.ExampleQrelsCreator"
-judge_class: "judges.complete_example.example_judge.ExampleLeaderboardJudge"
+nugget_class: "judges.complete_example.example_judge:ExampleNuggetCreator"
+qrels_class: "judges.complete_example.example_judge:ExampleQrelsCreator"
+judge_class: "judges.complete_example.example_judge:ExampleLeaderboardJudge"
 
 # =============================================================================
 # Lifecycle Flags

@@ -144,7 +144,7 @@ class MyJudge:
 
 Register in `workflow.yml`:
 ```yaml
-judge_class: "judges.myjudge.my_judge.MyJudge"
+judge_class: "judges.myjudge.my_judge:MyJudge"
 ```
 
 

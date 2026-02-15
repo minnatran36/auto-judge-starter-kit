@@ -33,7 +33,7 @@ class TinyJudge:
     Judges whether the first sentence of each response is relevant.
 
     Implements LeaderboardJudgeProtocol. Configure in workflow.yml:
-        judge_class: "judges.tinyjudge.tiny_judge.TinyJudge"
+        judge_class: "judges.tinyjudge.tiny_judge:TinyJudge"
     """
 
     def judge(

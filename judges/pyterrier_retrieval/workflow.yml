@@ -1,5 +1,5 @@
 # PyTerrier retrieval judge: no nuggets
-judge_class: "judges.pyterrier_retrieval.retrieval_judge.RetrievalJudge"
+judge_class: "judges.pyterrier_retrieval.retrieval_judge:RetrievalJudge"
 
 create_nuggets: false
 judge: true
