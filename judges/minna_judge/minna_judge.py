@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
+import asyncio
+import json
+from autojudge_base import (
+    LlmConfigProtocol,
+    Report,
+    Request,
+    Leaderboard,
+    LeaderboardBuilder,
+    LeaderboardSpec,
+    MeasureSpec,
+    Qrels,
+    QrelsSpec,
+    build_qrels,
+    doc_id_md5,
+    NuggetBanks,
+    NuggetBanksProtocol,
+)
+from autojudge_base.nugget_data import (
+    NuggetBank,
+    NuggetQuestion,
+)
+from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
+
+
+MINIMAL_SPEC = LeaderboardSpec(measures=(
+    MeasureSpec("SCORE"),
+    #MeasureSpec("HAS_KEYWORDS"),  # Use 1.0/0.0 for boolean
+))
+
+
+class GradeRecord:
+    """Simple record for qrels building."""
+    def __init__(self, topic_id: str, text: str, grade: int):
+        self.topic_id = topic_id
+        self.text = text
+        self.grade = grade
+
+
+MINIMAL_QRELS_SPEC = QrelsSpec[GradeRecord](
+    topic_id=lambda r: r.topic_id,
+    doc_id=lambda r: doc_id_md5(r.text),  # Hash response text as doc_id
+    grade=lambda r: r.grade,
+    on_duplicate="keep_max",  # Keep highest grade if duplicates
+)
+
+
+
+class MinnaNuggetCreator:
+    # Declare the nugget format this creator produces
+    nugget_banks_type: Type[NuggetBanksProtocol] = NuggetBanks
+
+    def create_nuggets(
+        self,
+        rag_responses: Iterable[Report],
+        rag_topics: Sequence[Request],
+        llm_config: LlmConfigProtocol,
+        nugget_banks: Optional[NuggetBanksProtocol] = None,
+        # Settings from workflow.yml nugget_settings
+        max_nuggets: int = 10,
+        **kwargs: Any,
+    ) -> Optional[NuggetBanksProtocol]:
+        
+        full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
+        backend = OpenAIMinimaLlm(full_config)
+        
+        banks: List[NuggetBank] = []
+        requests = []
+
+        for topic in rag_topics:            
+            requests.append(MinimaLlmRequest(
+                request_id=topic.request_id,
+                messages=[{"role": "system", "content": "Extract distinct sub-questions. Return JSON array with 'question' and 'answer' fields."},
+                          {"role": "user", "content": topic.problem_statement},],
+                            temperature=0.0,))
+            
+        results = asyncio.run(backend.run_batched(requests))
+
+        for topic, result in zip(rag_topics, results):
+            bank = NuggetBank(
+                query_id = topic.request_id,
+                title_query = topic.title or topic.request_id,
+            )
+
+            parsed = json.loads(result.text)
+            questions = []
+            for item in parsed[:max_nuggets]:
+                questions.append(NuggetQuestion.from_lazy(
+                    query_id = topic.request_id,
+                    question = item["question"],
+                    gold_answers = [item["answer"]],
+                ))
+            bank.add_nuggets(questions)
+            banks.append(bank)
+                
+           
+        return NuggetBanks.from_banks_list(banks)
+
+
+
+class MinnaQrelsCreator:
+    def create_qrels(
+        self,
+        rag_responses: Iterable[Report],
+        rag_topics: Sequence[Request],
+        llm_config: LlmConfigProtocol,
+        nugget_banks: Optional[NuggetBanksProtocol] = None,
+        # Settings from workflow.yml qrels_settings
+        grade_range: Tuple[int, int] = (0, 3),
+        length_threshold: int = 100,
+        **kwargs: Any,
+    ) -> Optional[Qrels]:
+        """Create relevance judgments for each response."""
+        full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
+        backend = OpenAIMinimaLlm(full_config)
+
+        #grade_records: List[GradeRecord] = []
+        requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
+
+        responses = list(rag_responses)
+    
+        for response in responses:
+            topic_id = response.metadata.topic_id
+            text = response.get_report_text()
+            if nugget_banks and topic_id in nugget_banks:
+                nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+            else:
+                nuggets = []
+           
+            for nugget in nuggets:
+                requests_info.append((
+                    response.metadata.run_id,  
+                    topic_id,                     
+                    MinimaLlmRequest(
+                    request_id=f"{response.metadata.run_id}_{topic_id}",
+                    messages=[
+                        {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
+                        {"role": "user", "content": f"Question: {nugget.question}\nExpected answer: {nugget.gold_answers[0]}\n\nResponse: {text}"},
+                    ],
+                    temperature=0.0,
+                    )
+                ))
+
+
+
+        results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
+        scores = {}
+
+        for(run_id, topic_id, _), result in zip(requests_info, results):
+            score = self._parse_binary(result)
+            scores.setdefault((run_id, topic_id), []).append(score)
+
+        for response in responses:
+            key = (response.metadata.run_id, response.metadata.topic_id)
+            tallies = scores[key]
+            grade = round(3*(sum(tallies)/len(tallies)))
+            grade_records.append(GradeRecord(response.metadata.topic_id, response.get_report_text(), grade))
+                            
+        qrels = build_qrels(records=grade_records, spec=MINIMAL_QRELS_SPEC)
+        print(f"MinnaQrelsCreator: Created qrels for {len(grade_records)} responses")
+        return qrels
+
+    def _parse_binary(self, result) -> int:
+        try:
+            text = result.text.strip().lower()
+            if(text.startswith("1") or text.startswith("yes")):
+                return 1
+            return 0
+        except:
+            return 0
+        
+# =============================================================================
+# ExampleLeaderboardJudge - LeaderboardJudgeProtocol
+# =============================================================================
+
+class MinnaLeaderboardJudge:
+    """
+    Scores responses and produces a leaderboard.
+
+    Implements LeaderboardJudgeProtocol. Scores are based on text length
+    and keyword matching from topic titles.
+    """
+
+    def judge(
+        self,
+        rag_responses: Iterable[Report],
+        rag_topics: Sequence[Request],
+        llm_config: LlmConfigProtocol,
+        nugget_banks: Optional[NuggetBanksProtocol] = None,
+        qrels: Optional[Qrels] = None,
+        # Settings from workflow.yml judge_settings
+        keyword_bonus: float = 0.2,
+        on_missing_evals: str = "fix_aggregate",
+        **kwargs: Any,
+    ) -> Leaderboard:
+        """Judge RAG responses and produce a leaderboard."""
+        expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
+        #topic_titles: Dict[str, str] = {t.request_id: (t.title or "").lower() for t in rag_topics}
+
+        full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
+        backend = OpenAIMinimaLlm(full_config)
+
+        responses = list(rag_responses) #convert from Iterable to list to reuse
+
+        grade_records: List[GradeRecord] = []
+        requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
+      
+        for response in responses:
+            topic_id = response.metadata.topic_id
+            text = response.get_report_text()
+            nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+           
+            for nugget in nuggets:
+                requests_info.append((
+                    response.metadata.run_id,  
+                    topic_id,                     
+                    MinimaLlmRequest(
+                    request_id=f"{response.metadata.run_id}_{topic_id}",
+                    messages=[
+                        {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
+                        {"role": "user", "content": f"Question: {nugget.question}\nExpected answer: {nugget.gold_answers[0]}\n\nResponse: {text}"},
+                    ],
+                    temperature=0.0,
+                    )
+                ))
+        results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
+        scores = {}
+        builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
+
+        for(run_id, topic_id, _), result in zip(requests_info, results):
+            score = self._parse_binary(result)
+            scores.setdefault((run_id, topic_id), []).append(score)
+
+        for response in responses:
+            key = (response.metadata.run_id, response.metadata.topic_id)
+            tallies = scores[key]
+            grade = sum(tallies)/len(tallies)
+
+            builder.add(
+                run_id=response.metadata.run_id,
+                topic_id=response.metadata.topic_id,
+                values={
+                    "SCORE": grade,
+                },
+            )
+        
+
+        leaderboard = builder.build(
+            expected_topic_ids=expected_topic_ids,
+            on_missing=on_missing_evals,
+        )
+        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
+        return leaderboard
+    
+    def _parse_binary(self, result) -> int:
+            try:
+                text = result.text.strip().lower()
+                if(text.startswith("1") or text.startswith("yes")):
+                    return 1
+                return 0
+            except:
+                return 0
+
+
+# =============================================================================
+# CLI Entry Point (optional - for direct execution)
+# =============================================================================
+# Note: With modular classes, prefer running via:
+#   auto-judge run --workflow workflow.yml
+#
+# For backwards compatibility, we still support direct CLI execution
+# by combining all three protocols into a single object.
+
+if __name__ == "__main__":
+    from autojudge_base import AutoJudge, auto_judge_to_click_command
+
+    class CompleteMinnaJudge(AutoJudge):
+        """Combined class for CLI compatibility."""
+        nugget_banks_type = NuggetBanks
+
+        def __init__(self):
+            self._nugget_creator = MinnaNuggetCreator()
+            #self._qrels_creator = MinnaQrelsCreator()
+            self._leaderboard_judge = MinnaLeaderboardJudge()
+
+        def create_nuggets(self, *args, **kwargs):
+            return self._nugget_creator.create_nuggets(*args, **kwargs)
+
+        #def create_qrels(self, *args, **kwargs):
+            #return self._qrels_creator.create_qrels(*args, **kwargs)
+
+        def judge(self, *args, **kwargs):
+            return self._leaderboard_judge.judge(*args, **kwargs)
+
+    auto_judge_to_click_command(CompleteMinnaJudge(), "simple_example_judge")()
