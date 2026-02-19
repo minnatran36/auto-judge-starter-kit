@@ -72,9 +72,12 @@ class MinnaNuggetCreator:
         for topic in rag_topics:            
             requests.append(MinimaLlmRequest(
                 request_id=topic.request_id,
-                messages=[{"role": "system", "content": "Extract distinct sub-questions. Return JSON array with 'question' and 'answer' fields."},
-                          {"role": "user", "content": topic.problem_statement},],
-                            temperature=0.0,))
+                messages=[
+                    {"role": "system", "content": "Extract distinct sub-questions. "
+                "Return ONLY a JSON array with no other text. Each element should have 'question' and 'answer' fields. "
+                "Example: [{\"question\": \"Why is the puppy so cute?\", \"answer\": \"Because he's chubby.\"}]"},
+                    {"role": "user", "content": topic.problem_statement},],
+                   temperature=0.0,))
             
         results = asyncio.run(backend.run_batched(requests))
 
@@ -137,7 +140,7 @@ class MinnaQrelsCreator:
                     request_id=f"{response.metadata.run_id}_{topic_id}",
                     messages=[
                         {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
-                        {"role": "user", "content": f"Question: {nugget.question}\nExpected answer: {nugget.gold_answers[0]}\n\nResponse: {text}"},
+                        {"role": "user", "content": f"Question: {nugget.question}\n\nResponse: {text}"},
                     ],
                     temperature=0.0,
                     )
@@ -210,6 +213,11 @@ class MinnaLeaderboardJudge:
         for response in responses:
             topic_id = response.metadata.topic_id
             text = response.get_report_text()
+
+            #first_nugget = nugget_banks.banks[topic_id].nuggets_as_list()[0]
+            #print(dir(first_nugget))
+            #print(vars(first_nugget))
+
             nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
            
             for nugget in nuggets:
@@ -220,7 +228,7 @@ class MinnaLeaderboardJudge:
                     request_id=f"{response.metadata.run_id}_{topic_id}",
                     messages=[
                         {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
-                        {"role": "user", "content": f"Question: {nugget.question}\nExpected answer: {nugget.gold_answers[0]}\n\nResponse: {text}"},
+                        {"role": "user", "content": f"Question: {nugget.question}\n\n\Response: {text}"},
                     ],
                     temperature=0.0,
                     )
