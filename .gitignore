@@ -11,3 +11,6 @@ output-kiddie/
 
 # generated runs
 /data/kiddie/runs/
+
+# generated outputs (do not track)
+/data/kiddie/runs/repgen/
