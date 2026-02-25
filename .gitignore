@@ -6,3 +6,8 @@ test-coverage
 out/
 output/
 output-kiddie/
+.DS_Store
+**/.DS_Store
+
+# generated runs
+/data/kiddie/runs/

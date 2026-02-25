@@ -115,22 +115,20 @@ class MinnaQrelsCreator:
         length_threshold: int = 100,
         **kwargs: Any,
     ) -> Optional[Qrels]:
-        """Create relevance judgments for each response."""
+        
+
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         backend = OpenAIMinimaLlm(full_config)
 
-        #grade_records: List[GradeRecord] = []
+        responses = list(rag_responses) #convert from Iterable to list to reuse
+        grade_records: List[GradeRecord] = []
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
-
-        responses = list(rag_responses)
-    
+      
         for response in responses:
             topic_id = response.metadata.topic_id
             text = response.get_report_text()
-            if nugget_banks and topic_id in nugget_banks:
-                nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
-            else:
-                nuggets = []
+
+            nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
            
             for nugget in nuggets:
                 requests_info.append((
@@ -145,9 +143,6 @@ class MinnaQrelsCreator:
                     temperature=0.0,
                     )
                 ))
-
-
-
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
         scores = {}
 
@@ -157,10 +152,12 @@ class MinnaQrelsCreator:
 
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
+            text = response.get_report_text()
+            topic_id = response.metadata.topic_id
             tallies = scores[key]
             grade = round(3*(sum(tallies)/len(tallies)))
-            grade_records.append(GradeRecord(response.metadata.topic_id, response.get_report_text(), grade))
-                            
+            grade_records.append(GradeRecord(topic_id, text, grade))
+        
         qrels = build_qrels(records=grade_records, spec=MINIMAL_QRELS_SPEC)
         print(f"MinnaQrelsCreator: Created qrels for {len(grade_records)} responses")
         return qrels
@@ -179,12 +176,6 @@ class MinnaQrelsCreator:
 # =============================================================================
 
 class MinnaLeaderboardJudge:
-    """
-    Scores responses and produces a leaderboard.
-
-    Implements LeaderboardJudgeProtocol. Scores are based on text length
-    and keyword matching from topic titles.
-    """
 
     def judge(
         self,
@@ -205,52 +196,68 @@ class MinnaLeaderboardJudge:
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         backend = OpenAIMinimaLlm(full_config)
 
+        builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         responses = list(rag_responses) #convert from Iterable to list to reuse
-
-        grade_records: List[GradeRecord] = []
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
-      
+       
+    
         for response in responses:
             topic_id = response.metadata.topic_id
             text = response.get_report_text()
+            
+            requests_info.append((
+                response.metadata.run_id,  
+                topic_id,                     
+                MinimaLlmRequest(
+                request_id=f"{response.metadata.run_id}_{topic_id}",
+                messages=[
+                    {"role": "system", "content": "You are a fact extractor. Extract only specific factual assertions from this response that are: "
+                    "- Verifiable against a source document"
+                    "- Not common knowledge "
+                    "- Specific enough to be true or false"},
 
-            #first_nugget = nugget_banks.banks[topic_id].nuggets_as_list()[0]
-            #print(dir(first_nugget))
-            #print(vars(first_nugget))
+                    {"role": "user", "content": f"Question:{text}"},
+                ],
+                temperature=0.0,
+                )
+            ))
 
-            nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
-           
-            for nugget in nuggets:
-                requests_info.append((
-                    response.metadata.run_id,  
-                    topic_id,                     
-                    MinimaLlmRequest(
-                    request_id=f"{response.metadata.run_id}_{topic_id}",
-                    messages=[
-                        {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
-                        {"role": "user", "content": f"Question: {nugget.question}\n\n\Response: {text}"},
-                    ],
-                    temperature=0.0,
-                    )
-                ))
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
-        scores = {}
-        builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
+        claims = {}
+
+        #create a general dict for documents
+        # how to quickly read from (list of docs) vs. (list of claims) -- k/(n claim numbers)
+        
+        from sentence_transformers import CrossEncoder
+        nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 
         for(run_id, topic_id, _), result in zip(requests_info, results):
-            score = self._parse_binary(result)
-            scores.setdefault((run_id, topic_id), []).append(score)
+            parsed = json.loads(result.text)
+            claims[(run_id, topic_id)] = parsed
 
+       
         for response in responses:
-            key = (response.metadata.run_id, response.metadata.topic_id)
-            tallies = scores[key]
-            grade = sum(tallies)/len(tallies)
+            scores = 0
+            key = (response.metadata.run_id, response.metadata.topic_id)            
+
+            
+                for sentence in response.get_sentences_with_citations():
+                    if not sentence.citations:
+                        continue
+                    for claim in claims[(key)]:
+
+                    score = nli_model.predict([(sentence, claim)])
+                    if score[0][1] > 0.5:
+                        scores += 1
+                        break
+            final_scores = scores/len(claims[key]) if claims[key] else 0.0
+           
 
             builder.add(
-                run_id=response.metadata.run_id,
-                topic_id=response.metadata.topic_id,
+                run_id = response.metadata.run_id,
+                topic_id = response.metadata.topic_id,
                 values={
-                    "SCORE": grade,
+                    "SCORE": final_scores,
                 },
             )
         
@@ -260,18 +267,15 @@ class MinnaLeaderboardJudge:
             on_missing=on_missing_evals,
         )
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
+         
+        leaderboard = builder.build(
+        expected_topic_ids=expected_topic_ids,
+        on_missing=on_missing_evals,
+        )
         return leaderboard
     
-    def _parse_binary(self, result) -> int:
-            try:
-                text = result.text.strip().lower()
-                if(text.startswith("1") or text.startswith("yes")):
-                    return 1
-                return 0
-            except:
-                return 0
-
-
+    
+    
 # =============================================================================
 # CLI Entry Point (optional - for direct execution)
 # =============================================================================
@@ -282,10 +286,11 @@ class MinnaLeaderboardJudge:
 # by combining all three protocols into a single object.
 
 if __name__ == "__main__":
+  
+ 
     from autojudge_base import AutoJudge, auto_judge_to_click_command
-
     class CompleteMinnaJudge(AutoJudge):
-        """Combined class for CLI compatibility."""
+        #Combined class for CLI compatibility.
         nugget_banks_type = NuggetBanks
 
         def __init__(self):
@@ -303,3 +308,27 @@ if __name__ == "__main__":
             return self._leaderboard_judge.judge(*args, **kwargs)
 
     auto_judge_to_click_command(CompleteMinnaJudge(), "simple_example_judge")()
+
+
+"""  
+    testing data
+    import json
+    with open("data/kiddie/runs/repgen/beet") as f:
+        data = json.loads(f.readline())
+    print("run id: ", data["metadata"]["run_id"])
+    print("topic id: ", data["metadata"]["topic_id"])
+    print("no. documents: ", len(data["documents"]))
+    
+
+    response = data["responses"][0]
+    print(type(response))
+    print(dir(response))
+    print(hasattr(response, 'documents'))
+    print(hasattr(response, 'raw'))
+    print(hasattr(response, 'data'))
+    print("first citation: ", first_sentence["citations"])
+
+    first_doc_id = list(data["documents"].keys())[0]
+    print("first doc id: ", data["documents"][first_doc_id])
+  
+"""  
