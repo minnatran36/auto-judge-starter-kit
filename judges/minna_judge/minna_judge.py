@@ -140,7 +140,7 @@ class MinnaQrelsCreator:
                         {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
                         {"role": "user", "content": f"Question: {nugget.question}\n\nResponse: {text}"},
                     ],
-                    temperature=0.3,
+                    temperature=0.0,
                     )
                 ))
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
@@ -210,14 +210,15 @@ class MinnaLeaderboardJudge:
                 MinimaLlmRequest(
                 request_id=f"{response.metadata.run_id}_{topic_id}",
                 messages=[
-                    {"role": "system", "content": "You are a fact extractor. Extract only specific factual assertions from this response that are: "
-                    "- Verifiable against a source document"
-                    "- Not common knowledge "
-                    "- Specific enough to be true or false"},
-
+                    {"role": "system", "content": (
+                        "You are a fact extractor. Extract only specific factual assertions from this response that are: "
+                        "verifiable against a source document, not common knowledge, specific enough to be true or false."
+                        "Return ONLY a JSON array of strings with no other text. "
+                        'Example: [\"claim1\", \"claim2\"]'
+                    )},                                                                                       
                     {"role": "user", "content": f"Response:{text}"},
                 ],
-                temperature=0.3,
+                temperature=0.0,
                 )
             ))
 
