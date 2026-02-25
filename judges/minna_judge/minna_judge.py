@@ -131,6 +131,9 @@ class MinnaQrelsCreator:
             topic_id = response.metadata.topic_id
             text = response.get_report_text()
 
+            if topic_id not in nugget_banks.banks:  
+                continue
+
             nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
            
             for nugget in nuggets:
