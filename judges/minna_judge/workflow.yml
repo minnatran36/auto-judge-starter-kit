@@ -18,14 +18,14 @@ judge_class: "judges.minna_judge.minna_judge:MinnaLeaderboardJudge"
 # Control which phases of the judge run and how data flows between them.
 
 create_nuggets: true              # Call create_nuggets() to generate nuggets
-create_qrels: false                # Call create_qrels() to generate relevance judgments
+create_qrels: true                # Call create_qrels() to generate relevance judgments
 judge: true                       # Call judge() to produce leaderboard
 
 # Data flow control
 nugget_depends_on_responses: true # Pass responses to create_nuggets()
 judge_uses_nuggets: true          # Pass nuggets to judge()
-judge_uses_qrels: false            # Pass qrels to judge()
-qrels_uses_nuggets: false         # Pass nuggets to create_qrels()
+judge_uses_qrels: true            # Pass qrels to judge()
+qrels_uses_nuggets: true        # Pass nuggets to create_qrels()
 
 # Force regeneration even if files exist
 force_recreate_nuggets: false

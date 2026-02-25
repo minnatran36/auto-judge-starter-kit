@@ -26,8 +26,8 @@ from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, Ope
 
 
 MINIMAL_SPEC = LeaderboardSpec(measures=(
-    MeasureSpec("SCORE"),
-    #MeasureSpec("HAS_KEYWORDS"),  # Use 1.0/0.0 for boolean
+    MeasureSpec("COMPLETENESS_SCORE"),
+    MeasureSpec("ATTRIBUTION_SCORE"),
 ))
 
 
@@ -77,7 +77,7 @@ class MinnaNuggetCreator:
                 "Return ONLY a JSON array with no other text. Each element should have 'question' and 'answer' fields. "
                 "Example: [{\"question\": \"Why is the puppy so cute?\", \"answer\": \"Because he's chubby.\"}]"},
                     {"role": "user", "content": topic.problem_statement},],
-                   temperature=0.0,))
+                   temperature=0.3,))
             
         results = asyncio.run(backend.run_batched(requests))
 
@@ -140,7 +140,7 @@ class MinnaQrelsCreator:
                         {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
                         {"role": "user", "content": f"Question: {nugget.question}\n\nResponse: {text}"},
                     ],
-                    temperature=0.0,
+                    temperature=0.3,
                     )
                 ))
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
@@ -191,15 +191,14 @@ class MinnaLeaderboardJudge:
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
-        #topic_titles: Dict[str, str] = {t.request_id: (t.title or "").lower() for t in rag_topics}
-
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         backend = OpenAIMinimaLlm(full_config)
 
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         responses = list(rag_responses) #convert from Iterable to list to reuse
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
-       
+
+   
     
         for response in responses:
             topic_id = response.metadata.topic_id
@@ -216,64 +215,69 @@ class MinnaLeaderboardJudge:
                     "- Not common knowledge "
                     "- Specific enough to be true or false"},
 
-                    {"role": "user", "content": f"Question:{text}"},
+                    {"role": "user", "content": f"Response:{text}"},
                 ],
-                temperature=0.0,
+                temperature=0.3,
                 )
             ))
 
+
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
         claims = {}
-
-        #create a general dict for documents
-        # how to quickly read from (list of docs) vs. (list of claims) -- k/(n claim numbers)
         
         from sentence_transformers import CrossEncoder
         nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 
+        qrels_dict= {}
+        if qrels:
+            for row in qrels.rows:
+                qrels_dict[(row.topic_id, row.doc_id)] = row.grade
+
         for(run_id, topic_id, _), result in zip(requests_info, results):
-            parsed = json.loads(result.text)
+            try: 
+                parsed = json.loads(result.text)
+            except json.JSONDecodeError:
+                parsed = []
             claims[(run_id, topic_id)] = parsed
+
 
        
         for response in responses:
             scores = 0
-            key = (response.metadata.run_id, response.metadata.topic_id)            
+            key = (response.metadata.run_id, response.metadata.topic_id)  
+            text = response.get_report_text()    
+            text_id = doc_id_md5(text) 
+            topic_id = response.metadata.topic_id
 
-            
-                for sentence in response.get_sentences_with_citations():
-                    if not sentence.citations:
-                        continue
-                    for claim in claims[(key)]:
-
-                    score = nli_model.predict([(sentence, claim)])
+            for claim in claims[(key)]:
+                supported = False
+                for doc_id, doc in response.documents.items():
+                    score = nli_model.predict([(doc.text, claim)])
                     if score[0][1] > 0.5:
-                        scores += 1
+                        supported = True
                         break
-            final_scores = scores/len(claims[key]) if claims[key] else 0.0
+                if supported: scores += 1
+            attribution = scores/len(claims[key]) if claims[key] else 0.0
            
 
             builder.add(
                 run_id = response.metadata.run_id,
-                topic_id = response.metadata.topic_id,
+                topic_id = topic_id,
                 values={
-                    "SCORE": final_scores,
+                   "COMPLETENESS_SCORE": qrels_dict.get((topic_id, text_id), 0) / 3.0,
+                   "ATTRIBUTION_SCORE": attribution, 
                 },
             )
-        
+      
 
         leaderboard = builder.build(
             expected_topic_ids=expected_topic_ids,
             on_missing=on_missing_evals,
         )
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
-         
-        leaderboard = builder.build(
-        expected_topic_ids=expected_topic_ids,
-        on_missing=on_missing_evals,
-        )
         return leaderboard
-    
+
+   
     
     
 # =============================================================================
@@ -295,14 +299,14 @@ if __name__ == "__main__":
 
         def __init__(self):
             self._nugget_creator = MinnaNuggetCreator()
-            #self._qrels_creator = MinnaQrelsCreator()
+            self._qrels_creator = MinnaQrelsCreator()
             self._leaderboard_judge = MinnaLeaderboardJudge()
 
         def create_nuggets(self, *args, **kwargs):
             return self._nugget_creator.create_nuggets(*args, **kwargs)
 
-        #def create_qrels(self, *args, **kwargs):
-            #return self._qrels_creator.create_qrels(*args, **kwargs)
+        def create_qrels(self, *args, **kwargs):
+            return self._qrels_creator.create_qrels(*args, **kwargs)
 
         def judge(self, *args, **kwargs):
             return self._leaderboard_judge.judge(*args, **kwargs)
