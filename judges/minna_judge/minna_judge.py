@@ -260,11 +260,11 @@ class MinnaLeaderboardJudge:
                 if supported: scores += 1
             attribution = scores/len(claims[key]) if claims[key] else 0.0
            
+            completeness = (qrels_dict.get((topic_id, text_id), 0) / 3.0)
 
             builder.add(
                 run_id = response.metadata.run_id,
-                topic_id = topic_id,
-                completeness = (qrels_dict.get((topic_id, text_id), 0) / 3.0)
+                topic_id = topic_id,               
                 values={
                    "COMPLETENESS_SCORE": completeness,
                    "ATTRIBUTION_SCORE": attribution, 
