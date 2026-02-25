@@ -30,6 +30,7 @@ nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("COMPLETENESS_SCORE"),
     MeasureSpec("ATTRIBUTION_SCORE"),
+    MeasureSpec("FINAL_SCORE"),
 ))
 
 
@@ -263,9 +264,11 @@ class MinnaLeaderboardJudge:
             builder.add(
                 run_id = response.metadata.run_id,
                 topic_id = topic_id,
+                completeness = (qrels_dict.get((topic_id, text_id), 0) / 3.0)
                 values={
-                   "COMPLETENESS_SCORE": qrels_dict.get((topic_id, text_id), 0) / 3.0,
+                   "COMPLETENESS_SCORE": completeness,
                    "ATTRIBUTION_SCORE": attribution, 
+                   "FINAL_SCORE": 0.5 * (completeness + attribution),
                 },
             )
       
