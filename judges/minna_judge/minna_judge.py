@@ -23,6 +23,8 @@ from autojudge_base.nugget_data import (
     NuggetQuestion,
 )
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
+from sentence_transformers import CrossEncoder
+nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 
 
 MINIMAL_SPEC = LeaderboardSpec(measures=(
@@ -212,11 +214,11 @@ class MinnaLeaderboardJudge:
                 messages=[
                     {"role": "system", "content": (
                         "You are a fact extractor. Extract only specific factual assertions from this response that are: "
-                        "verifiable against a source document, not common knowledge, specific enough to be true or false."
+                        "verifiable against a source document, not common knowledge, specific enough to be true or false. "
                         "Return ONLY a JSON array of strings with no other text. "
                         'Example: [\"claim1\", \"claim2\"]'
                     )},                                                                                       
-                    {"role": "user", "content": f"Response:{text}"},
+                    {"role": "user", "content": f"Response: {text}"},
                 ],
                 temperature=0.0,
                 )
@@ -225,9 +227,6 @@ class MinnaLeaderboardJudge:
 
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
         claims = {}
-        
-        from sentence_transformers import CrossEncoder
-        nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 
         qrels_dict= {}
         if qrels:
