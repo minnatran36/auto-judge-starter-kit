@@ -68,8 +68,7 @@ class MinnaNuggetCreator:
     ) -> Optional[NuggetBanksProtocol]:
         
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
-        full_config = dataclasses.replace(full_config, rpm=400, max_attempts=10)
-
+        full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
 
         backend = OpenAIMinimaLlm(full_config)
         
@@ -125,8 +124,7 @@ class MinnaQrelsCreator:
         
 
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
-        full_config = dataclasses.replace(full_config, rpm=400, max_attempts=10)
-
+        full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
 
         responses = list(rag_responses) #convert from Iterable to list to reuse
@@ -207,8 +205,8 @@ class MinnaLeaderboardJudge:
         """Judge RAG responses and produce a leaderboard."""
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
-        full_config = dataclasses.replace(full_config, rpm=400, max_attempts=10)
-
+        full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
+        
         backend = OpenAIMinimaLlm(full_config)
 
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
