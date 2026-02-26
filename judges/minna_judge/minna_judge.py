@@ -206,7 +206,7 @@ class MinnaLeaderboardJudge:
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
-        
+
         backend = OpenAIMinimaLlm(full_config)
 
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
@@ -249,7 +249,7 @@ class MinnaLeaderboardJudge:
         for(run_id, topic_id, _), result in zip(requests_info, results):
             try: 
                 parsed = json.loads(result.text)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, AttributeError):
                 parsed = []
             claims[(run_id, topic_id)] = parsed
 
