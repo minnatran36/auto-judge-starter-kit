@@ -145,7 +145,7 @@ class MinnaQrelsCreator:
                     response.metadata.run_id,  
                     topic_id,                     
                     MinimaLlmRequest(
-                    request_id=f"{response.metadata.run_id}_{topic_id}",
+                    request_id=f"{response.metadata.run_id}_{topic_id}_{nugget.question_id}", #fix1
                     messages=[
                         {"role": "system", "content": "Does this response answer this question? Reply 1 for yes, 0 for no."},
                         {"role": "user", "content": f"Question: {nugget.question}\n\nResponse: {text}"},
@@ -240,6 +240,8 @@ class MinnaLeaderboardJudge:
 
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
         claims = {}
+        pairs = [] #(doc, claim)
+        pair_index = [] #(which ans the doc from)
 
         qrels_dict= {}
         if qrels:
@@ -254,26 +256,50 @@ class MinnaLeaderboardJudge:
             claims[(run_id, topic_id)] = parsed
 
 
-       
         for response in responses:
-            scores = 0
             key = (response.metadata.run_id, response.metadata.topic_id)  
-            text = response.get_report_text()    
-            text_id = doc_id_md5(text) 
-            topic_id = response.metadata.topic_id
 
-            for claim in claims[(key)]:
-                supported = False
+            for claim_id, claim in enumerate(claims.get(key,[])):
                 for doc_id, doc in response.documents.items():
-                    score = nli_model.predict([(doc.text, claim)])
-                    if score[0][1] > 0.5:
-                        supported = True
-                        break
-                if supported: scores += 1
-            attribution = scores/len(claims[key]) if claims[key] else 0.0
-           
-            completeness = (qrels_dict.get((topic_id, text_id), 0) / 3.0)
+                    pairs.append((doc.text, claim))
+                    pair_index.append((key, claim_id))
 
+
+        CHUNK_SIZE = 500
+        all_scores = []
+        if pairs:
+            for i in range(0, len(pairs), CHUNK_SIZE):
+                chunk_scores = nli_model.predict(pairs[i:i+CHUNK_SIZE])
+                all_scores.extend(chunk_scores)
+
+
+        score_dict = {}
+
+        #test_scores[0] = [-4.96, 4.71, -1.23] -- score[1], logit
+        for (key, claim_id), score in zip(pair_index, all_scores):
+            if score[1] > 0.0:
+                score_dict[(key, claim_id)] = True
+            elif (key, claim_id) not in score_dict:
+                score_dict[(key, claim_id)] = False
+            
+
+        for response in responses:
+            key = (response.metadata.run_id, response.metadata.topic_id)
+            topic_id = response.metadata.topic_id
+            text = response.get_report_text()
+            text_id = doc_id_md5(text)
+            attr_score = 0
+            claim_list = claims.get(key,[])
+
+            if claim_list:
+                for i in range(len(claim_list)):
+                    attr_score += score_dict.get((key, i), False)
+
+                attribution = attr_score/len(claim_list)  
+            else:
+                attribution = 0
+            
+            completeness = (qrels_dict.get((topic_id, text_id), 0) / 3.0)
             builder.add(
                 run_id = response.metadata.run_id,
                 topic_id = topic_id,               
