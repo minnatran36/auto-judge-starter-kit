@@ -248,11 +248,6 @@ class MinnaLeaderboardJudge:
             for row in qrels.rows:
                 qrels_dict[(row.topic_id, row.doc_id)] = row.grade
 
-        if qrels:
-            print(f"qrels rows count: {len(list(qrels.rows))}")
-            print(f"sample qrels keys: {list(qrels_dict.keys())[:3]}")
-        else:
-            print("qrels is None!")
 
         for(run_id, topic_id, _), result in zip(requests_info, results):
             try: 
@@ -295,9 +290,9 @@ class MinnaLeaderboardJudge:
             text = response.get_report_text()
             text_id = doc_id_md5(text)
 
-            print(f"looking for key: {(topic_id, text_id)}")
-            print(f"match found: {(topic_id, text_id) in qrels_dict}")
-            
+            #print(f"looking for key: {(topic_id, text_id)}")
+            #print(f"match found: {(topic_id, text_id) in qrels_dict}")
+
             attr_score = 0
             claim_list = claims.get(key,[])
 
