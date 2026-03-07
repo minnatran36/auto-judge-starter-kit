@@ -4,6 +4,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 import asyncio
 import json
 import dataclasses
+import os
+import hashlib
 from autojudge_base import (
     LlmConfigProtocol,
     Report,
@@ -187,6 +189,15 @@ class MinnaQrelsCreator:
 # =============================================================================
 # ExampleLeaderboardJudge - LeaderboardJudgeProtocol
 # =============================================================================
+def load_cache(path):
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+        return {}
+    
+def save_cache(data, path):
+    with open(path, "w") as f:
+        json.dump(data, f)
 
 class MinnaLeaderboardJudge:
 
@@ -213,12 +224,17 @@ class MinnaLeaderboardJudge:
         responses = list(rag_responses) #convert from Iterable to list to reuse
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
 
-   
-    
+        claims_cache_path = "output-kiddie/minna_judge.claims_cache.json"
+        claims_cache = load_cache(claims_cache_path)
+
         for response in responses:
             topic_id = response.metadata.topic_id
+            key = f"{response.metadata.run_id}_{topic_id}"
+
+            if key in claims_cache:
+                continue
+
             text = response.get_report_text()
-            
             requests_info.append((
                 response.metadata.run_id,  
                 topic_id,                     
@@ -237,9 +253,13 @@ class MinnaLeaderboardJudge:
                 )
             ))
 
-
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
+        
         claims = {}
+        for key, value in claims_cache.items():
+            run_id, topic_id = key.split("_", 1)
+            claims[((run_id, topic_id))] = value
+
         pairs = [] #(doc, claim)
         pair_index = [] #(which ans the doc from)
 
@@ -250,12 +270,14 @@ class MinnaLeaderboardJudge:
 
 
         for(run_id, topic_id, _), result in zip(requests_info, results):
+            key = f"{run_id}_{topic_id}"
             try: 
                 parsed = json.loads(result.text)
             except (json.JSONDecodeError, AttributeError):
                 parsed = []
             claims[(run_id, topic_id)] = parsed
-
+            claims_cache[key] = parsed
+        save_cache(claims_cache, f"{filebase}.claims_cache.json")
 
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)  
@@ -322,7 +344,6 @@ class MinnaLeaderboardJudge:
         )
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
         return leaderboard
-
    
     
     
