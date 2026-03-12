@@ -214,6 +214,7 @@ class MinnaLeaderboardJudge:
         **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
+        filebase = kwargs.get("filebase", "output-kiddie/minna_judge")
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
@@ -254,7 +255,7 @@ class MinnaLeaderboardJudge:
             ))
 
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
-        
+
         claims = {}
         for key, value in claims_cache.items():
             run_id, topic_id = key.split("_", 1)
@@ -277,7 +278,7 @@ class MinnaLeaderboardJudge:
                 parsed = []
             claims[(run_id, topic_id)] = parsed
             claims_cache[key] = parsed
-        save_cache(claims_cache, f"{filebase}.claims_cache.json")
+        save_cache(claims_cache, claims_cache_path)
 
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)  

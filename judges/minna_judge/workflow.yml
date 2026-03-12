@@ -27,7 +27,7 @@ judge_uses_nuggets: true          # Pass nuggets to judge()
 judge_uses_qrels: true            # Pass qrels to judge()
 qrels_uses_nuggets: true        # Pass nuggets to create_qrels()
 
-# Force regeneration even if files exist
+# Force regeneration even if files exist/ false if cache
 force_recreate_nuggets: false
 force_recreate_qrels: false
 
@@ -100,7 +100,7 @@ sweeps:
   # Sweep over keyword bonus values
   keyword-sweep:
     judge_settings:
-      keyword_bonus: [0.1, 0.2, 0.3, 0.4]
+      keyword_bonus: [0.1, 0.2, 0.3, 0.4]       # 1.what's keyword_bonus?
 
   # Full grid search: questions x bonus
   grid-search:
