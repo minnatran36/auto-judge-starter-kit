@@ -190,10 +190,10 @@ class MinnaQrelsCreator:
 # ExampleLeaderboardJudge - LeaderboardJudgeProtocol
 # =============================================================================
 def load_cache(path):
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
-        return {}
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
     
 def save_cache(data, path):
     with open(path, "w") as f:
@@ -225,7 +225,7 @@ class MinnaLeaderboardJudge:
         responses = list(rag_responses) #convert from Iterable to list to reuse
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
 
-        claims_cache_path = "output-kiddie/minna_judge.claims_cache.json"
+        claims_cache_path = f"{filebase}.claims_cache.json"
         claims_cache = load_cache(claims_cache_path)
 
         for response in responses:
@@ -258,8 +258,8 @@ class MinnaLeaderboardJudge:
 
         claims = {}
         for key, value in claims_cache.items():
-            run_id, topic_id = key.split("_", 1)
-            claims[((run_id, topic_id))] = value
+            r_id, t_id = key.split("_", 1)
+            claims[((r_id, t_id))] = value
 
         pairs = [] #(doc, claim)
         pair_index = [] #(which ans the doc from)
