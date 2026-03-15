@@ -281,6 +281,8 @@ class MinnaLeaderboardJudge:
         save_cache(claims_cache, claims_cache_path)
 
         for response in responses:
+            if not response.documents:
+                continue
             key = (response.metadata.run_id, response.metadata.topic_id)  
 
             for claim_id, claim in enumerate(claims.get(key,[])):
@@ -404,4 +406,3 @@ if __name__ == "__main__":
     print("first doc id: ", data["documents"][first_doc_id])
   
 """  
-
