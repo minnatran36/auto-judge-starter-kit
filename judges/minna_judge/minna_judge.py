@@ -253,61 +253,73 @@ class MinnaLeaderboardJudge:
                 temperature=0.0,
                 )
             ))
-
+        #EXTRACT CLAIMS
         results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
 
         claims = {}
+        #CHECK IF CLAIM ALREADY IN CACHE
         for key, value in claims_cache.items():
             r_id, t_id = key.split("_", 1)
             claims[((r_id, t_id))] = value
 
-        pairs = [] #(doc, claim)
-        pair_index = [] #(which ans the doc from)
+        
 
         qrels_dict= {}
         if qrels:
             for row in qrels.rows:
                 qrels_dict[(row.topic_id, row.doc_id)] = row.grade
 
-
+        #UNZIP RESULTS
         for(run_id, topic_id, _), result in zip(requests_info, results):
             key = f"{run_id}_{topic_id}"
             try: 
                 parsed = json.loads(result.text)
             except (json.JSONDecodeError, AttributeError):
                 parsed = []
-            claims[(run_id, topic_id)] = parsed
+            claims[(run_id, topic_id)] = parsed #parsed = full list of claims per key
             claims_cache[key] = parsed
         save_cache(claims_cache, claims_cache_path)
 
+        pairs = [] 
+        pair_index = [] 
+        nli_scores_cache_path = f"{filebase}.nli_scores_cache.json"
+        nli_scores_cache = load_cache(nli_scores_cache_path) #nli_scores_cache[key, doc_id, claim_text]
+        score_dict = {} 
         for response in responses:
             if not response.documents:
                 continue
-            key = (response.metadata.run_id, response.metadata.topic_id)  
 
-            for claim_id, claim in enumerate(claims.get(key,[])):
+            key = (response.metadata.run_id, response.metadata.topic_id)
+
+            for claim in claims.get(key,[]):
                 for doc_id, doc in response.documents.items():
+                    key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
+                    if key_str in nli_scores_cache: #score in cache
+                        #there are multiple nli_scores_cache[key_str] match to 1 score_dict[key, claim]
+                        if nli_scores_cache[key_str] == 1:
+                            score_dict[key, claim] = 1
+                        continue
                     pairs.append((doc.text, claim))
-                    pair_index.append((key, claim_id))
+                    pair_index.append((key, doc_id, claim))
 
-
+        #HOW TO CACHE?
         CHUNK_SIZE = 500
-        all_scores = []
+        all_nli_scores = []
         if pairs:
             for i in range(0, len(pairs), CHUNK_SIZE):
                 chunk_scores = nli_model.predict(pairs[i:i+CHUNK_SIZE])
-                all_scores.extend(chunk_scores)
+                all_nli_scores.extend(chunk_scores)
+           
 
-
-        score_dict = {}
-
-        #test_scores[0] = [-4.96, 4.71, -1.23] -- score[1], logit
-        for (key, claim_id), score in zip(pair_index, all_scores):
-            if score[1] > 0.0:
-                score_dict[(key, claim_id)] = True
-            elif (key, claim_id) not in score_dict:
-                score_dict[(key, claim_id)] = False
-            
+            #test_scores[0] = [-4.96, 4.71, -1.23] -- score[1], logit
+            for (key, doc_id, claim), score in zip(pair_index, all_nli_scores):
+                key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
+                if score[1] > 0.0:
+                    score_dict[(key, claim)] = 1
+                elif (key, claim) not in score_dict:
+                    score_dict[(key, claim)] = 0
+                nli_scores_cache[key_str] = score_dict[(key, claim)]
+            save_cache(nli_scores_cache, nli_scores_cache_path)    
 
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -315,15 +327,12 @@ class MinnaLeaderboardJudge:
             text = response.get_report_text()
             text_id = doc_id_md5(text)
 
-            #print(f"looking for key: {(topic_id, text_id)}")
-            #print(f"match found: {(topic_id, text_id) in qrels_dict}")
-
             attr_score = 0
             claim_list = claims.get(key,[])
 
             if claim_list:
-                for i in range(len(claim_list)):
-                    attr_score += score_dict.get((key, i), False)
+                for claim in claim_list:
+                    attr_score += score_dict.get((key, claim), 0)
 
                 attribution = attr_score/len(claim_list)  
             else:
