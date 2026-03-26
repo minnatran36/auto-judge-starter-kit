@@ -1,0 +1,280 @@
+================================================================================
+MINNA JUDGE — HOW IT WORKS & WHAT WAS IMPROVED
+================================================================================
+
+This file explains the design of minna_judge, the bugs that were fixed, and
+the reasoning behind each decision. Read this alongside minna_judge.py.
+
+
+────────────────────────────────────────────────────────────────────────────────
+OVERVIEW: THREE-STAGE PIPELINE
+────────────────────────────────────────────────────────────────────────────────
+
+The judge runs in three sequential stages, each producing output that feeds
+into the next. The workflow framework (workflow.yml) controls whether each
+stage runs and whether its output is passed downstream.
+
+    Stage 1 — MinnaNuggetCreator
+        Input:  topics (questions/problem statements)
+        Output: nugget banks — a set of factual checkpoints per topic
+        Purpose: define what a "complete" answer must cover
+
+    Stage 2 — MinnaQrelsCreator
+        Input:  RAG system responses + nugget banks from Stage 1
+        Output: qrels — a relevance grade (0–3) per (system, topic) pair
+        Purpose: measure completeness — did the response cover the key facts?
+
+    Stage 3 — MinnaLeaderboardJudge
+        Input:  RAG system responses + qrels from Stage 2
+        Output: leaderboard with COMPLETENESS_SCORE, ATTRIBUTION_SCORE, FINAL_SCORE
+        Purpose: measure attribution — are the response's factual claims
+                 supported by the source documents it retrieved?
+
+The final score is: FINAL_SCORE = 0.5 × (COMPLETENESS + ATTRIBUTION)
+
+
+────────────────────────────────────────────────────────────────────────────────
+STAGE 1: NUGGET CREATION (MinnaNuggetCreator)
+────────────────────────────────────────────────────────────────────────────────
+
+WHAT IT DOES:
+    For each topic, sends the question to an LLM and asks it to list the
+    specific facts a complete answer must include. Each nugget has:
+        - question: a yes/no checklist item ("Does the response state X?")
+        - answer:   the expected specific fact ("The treaty was signed in 1987.")
+
+    These nuggets become the grading rubric for Stage 2.
+
+FIX 1 — Parameter name mismatch (silent bug):
+    The original code defined the parameter as max_nuggets=10.
+    workflow.yml specified questions_per_topic: 3.
+    Because the names didn't match, the workflow setting was silently ignored
+    via **kwargs — every run used 10 nuggets regardless of the config.
+    Fixed: renamed the parameter to questions_per_topic and updated workflow.yml
+    to use max_nuggets: 10 (the actual parameter name). Both now agree on 10.
+
+    Why 10 matters: with 3 nuggets, completeness scores can only be {0, 0.33,
+    0.67, 1.0} — four discrete values. With 10 nuggets you get 11 values (0 to
+    1 in steps of 0.1), which gives finer discrimination between systems.
+
+FIX 2 — Prompt reframe (accuracy vs. coverage):
+    Old prompt: "Extract distinct sub-questions."
+    Problem: produced abstract sub-questions like "What is the impact of X?"
+    that are hard to check and don't encode what the correct answer IS.
+
+    New prompt: "List the specific key facts a complete answer MUST include."
+    Each nugget now has a concrete expected fact as the gold answer. This makes
+    Stage 2 check whether the response got the facts right, not just whether
+    it mentioned the topic.
+
+FIX 3 — Include topic title:
+    Old: only problem_statement was sent to the LLM.
+    New: title + problem_statement are both included.
+    The title is a short anchor that prevents the LLM from drifting when the
+    problem_statement is long or ambiguous.
+
+CACHE: Stage 1 output is cached by the workflow framework (force_recreate_nuggets:
+false in workflow.yml). The nuggets file is reused on subsequent runs unless
+you delete it or set force_recreate_nuggets: true.
+
+
+────────────────────────────────────────────────────────────────────────────────
+STAGE 2: QRELS CREATION (MinnaQrelsCreator)
+────────────────────────────────────────────────────────────────────────────────
+
+WHAT IT DOES:
+    For each (response, nugget) pair, asks the LLM: "Does this response
+    correctly address the question with information consistent with the
+    expected fact?"
+
+    For each response, the fraction of nuggets answered correctly is multiplied
+    by 3 and rounded to give a grade in {0, 1, 2, 3}.
+
+    These grades become the COMPLETENESS_SCORE in Stage 3:
+        completeness = grade / 3.0    (normalised to 0–1)
+
+FIX — Show the gold answer (accuracy vs. topic coverage):
+    Old prompt: "Does this response answer this question? Reply 1 for yes, 0 for no."
+    Problem: the LLM had no idea what the correct answer was. A response that
+    vaguely mentioned the topic could score 1 without being factually correct.
+    This measured relevance, not accuracy.
+
+    New prompt: shows the LLM both the question AND the expected fact from the
+    nugget. Now it checks whether the response states something consistent with
+    the known correct answer.
+
+    Cache compatibility: the LLM request_id is unchanged
+    (f"{run_id}_{topic_id}_{nugget.question_id}"), so any qrels output files
+    already cached by the workflow framework are unaffected.
+
+CACHE: Like Stage 1, the qrels output file is cached by the framework
+(force_recreate_qrels: false). Delete the .qrels file or set
+force_recreate_qrels: true to regenerate.
+
+
+────────────────────────────────────────────────────────────────────────────────
+STAGE 3: LEADERBOARD JUDGE (MinnaLeaderboardJudge)
+────────────────────────────────────────────────────────────────────────────────
+
+WHAT IT DOES:
+    Two sub-steps:
+
+    3a. Claim extraction (LLM):
+        For each response, extracts specific verifiable factual claims.
+        These are the assertions the system is "staking its reputation on."
+
+    3b. NLI attribution (local model):
+        For each (claim, source document) pair, the cross-encoder NLI model
+        checks if the document entails the claim. Under "lenient attribution",
+        a claim is considered attributed if ANY of the response's source
+        documents supports it.
+
+        Attribution score = (# attributed claims) / (# total claims)
+
+    The ATTRIBUTION_SCORE measures: "are the things this response asserts
+    actually supported by what it retrieved?" A high score means the response
+    didn't fabricate information.
+
+FIX 1 — Claim extraction prompt (noise reduction):
+    Old prompt let through opinions ("X is important"), hedged claims
+    ("X may cause Y"), and meta-statements ("this response covers...").
+    These are not verifiable against source documents, so attributing them
+    inflated the attribution score.
+
+    New prompt explicitly excludes: opinions, any claim using "may/might/could/
+    possibly/reportedly", and meta-statements. The result is a cleaner claim
+    list with fewer false positives.
+
+    Cache compatibility: claims are cached by f"{run_id}_{topic_id}". Old cached
+    claim lists are reused as-is. Only responses not yet in the cache will use
+    the improved prompt. This means the benefit applies incrementally — you can
+    clear claims_cache.json to regenerate everything with the new prompt.
+
+FIX 2 — NLI early exit (efficiency):
+    Old code: queued ALL (document, claim) pairs for NLI, even when a cached
+    result already confirmed the claim was supported.
+
+    With responses that have multiple source documents (e.g., 5 docs per
+    response), checking claim C against all 5 docs is wasted work the moment
+    doc 1 confirms support. The old code didn't short-circuit this.
+
+    New code: for each claim, first checks all cached (doc, claim) results.
+    If any cached result is 1 (supported), the claim is marked as attributed
+    and the remaining uncached docs are skipped entirely — they never enter
+    the NLI queue. Only uncached docs for unsupported claims get processed.
+
+    On first run (empty NLI cache) there is no difference. On subsequent runs
+    with a warm cache, the NLI queue can shrink significantly.
+
+FIX 3 — NLI cache write bug:
+    Old code wrote this to the NLI cache:
+        nli_scores_cache[key_str] = score_dict[(key, claim)]
+
+    score_dict[(key, claim)] is the AGGREGATE (max across all docs seen so far).
+    If doc1 supported claim C (aggregate→1) and doc2 did not, the old code would
+    store 1 in the cache for the doc2 entry — making doc2 appear to support
+    claim C on the next run.
+
+    This corrupted the cache semantics but did NOT change final scores for
+    lenient attribution (the aggregate was already 1 from doc1 regardless).
+    However, it would cause wrong results if you ever switched to strict
+    attribution (where each claim must be supported by its specific cited doc).
+
+    New code writes the raw per-doc NLI result (0 or 1 for this specific doc
+    only), independent of what other docs scored:
+        raw_nli = 1 if score[1] > 0.0 else 0
+        nli_scores_cache[key_str] = raw_nli   ← raw result, not aggregate
+
+    Existing cached entries remain valid and are fully reused.
+
+FIX 4 — Claim length filter (noise reduction):
+    Very short strings (< 10 characters) from the LLM extraction step are
+    filtered out. These are typically artefacts (fragment sentences, punctuation)
+    that produce meaningless NLI comparisons.
+
+
+────────────────────────────────────────────────────────────────────────────────
+CACHE FILES — FORMATS AND HOW TO REUSE
+────────────────────────────────────────────────────────────────────────────────
+
+The judge writes two JSON cache files to the filebase path:
+
+    {filebase}.claims_cache.json
+        Format: { "run_id_topic_id": ["claim1", "claim2", ...], ... }
+        Reuse:  fully safe — key format unchanged. Old entries reused as-is.
+        Reset:  delete this file to re-extract claims with the improved prompt.
+
+    {filebase}.nli_scores_cache.json
+        Format: { "run_id_topic_id_doc_id_claim_text": 0_or_1, ... }
+        Reuse:  fully safe — key format unchanged, old 0/1 values still valid.
+        Note:   old entries that were incorrectly written as 1 (due to the cache
+                write bug) would at most give the same final lenient attribution
+                score as before. No correctness regression.
+        Reset:  delete this file to recompute all NLI scores from scratch.
+
+The workflow framework also caches:
+    {filebase}.nuggets.json   — Stage 1 output (controlled by force_recreate_nuggets)
+    {filebase}.qrels.json     — Stage 2 output (controlled by force_recreate_qrels)
+
+
+────────────────────────────────────────────────────────────────────────────────
+HOW TO RUN
+────────────────────────────────────────────────────────────────────────────────
+
+Full run (all three stages):
+    auto-judge run \
+        --workflow judges/minna_judge/workflow.yml \
+        --rag-responses data/kiddie/runs/repgen/ \
+        --rag-topics data/kiddie/topics/kiddie-topics.jsonl \
+        --out-dir ./output-kiddie/
+
+Judge only (skip nugget/qrels regeneration, use existing cache):
+    auto-judge run \
+        --workflow judges/minna_judge/workflow.yml \
+        --variant judge-only \
+        --rag-responses data/kiddie/runs/repgen/ \
+        --rag-topics data/kiddie/topics/kiddie-topics.jsonl \
+        --out-dir ./output-kiddie/
+
+Force-regenerate nuggets and qrels (clear Stage 1+2 cache):
+    Set force_recreate_nuggets: true and force_recreate_qrels: true
+    in workflow.yml, or delete the cached .nuggets.json / .qrels.json files.
+
+LLM config (required for Stages 1, 2, and claim extraction in Stage 3):
+    export MINIMA_API_KEY=...
+    export MINIMA_BASE_URL=...
+    export MINIMA_MODEL=...
+    Or provide an llm-config.yml file.
+
+
+────────────────────────────────────────────────────────────────────────────────
+KNOWN LIMITATIONS
+────────────────────────────────────────────────────────────────────────────────
+
+1.  Nuggets are LLM-generated, not human-verified.
+    The gold answers used for completeness grading are produced by the same
+    class of LLM being evaluated. If the LLM misunderstands the question,
+    the grading rubric will be wrong for all systems. Human-authored nuggets
+    (TREC style) would be more reliable but require manual effort.
+
+2.  Completeness and attribution are correlated signals.
+    A response that covers all nuggets tends to also make claims grounded in
+    its source documents. The 50/50 blend in FINAL_SCORE double-weights a
+    shared underlying quality dimension. Consider adjusting the weights or
+    treating the two scores separately when analysing results.
+
+3.  NLI threshold is fixed at entailment logit > 0.
+    This threshold was chosen for the original codebase and is kept unchanged
+    for cache consistency. It is not calibrated against ground-truth attribution
+    labels for this specific domain. To experiment with a different threshold,
+    delete nli_scores_cache.json and change the condition in MinnaLeaderboardJudge.
+
+4.  ~34% of (system, topic) pairs were missing in the existing output.
+    Missing entries are filled in by on_missing="fix_aggregate". This is a
+    framework fallback, not a real judgment. Investigate which systems have
+    low topic coverage before drawing conclusions from the leaderboard.
+
+5.  Claim extraction quality drives everything downstream.
+    If the LLM extracts poor claims (too vague, too many, or incorrect), the
+    attribution score is unreliable. The improved prompt reduces but does not
+    eliminate this risk. There is no automatic validation of extracted claims.

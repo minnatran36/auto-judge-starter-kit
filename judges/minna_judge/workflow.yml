@@ -22,7 +22,8 @@ create_qrels: true                # Call create_qrels() to generate relevance ju
 judge: true                       # Call judge() to produce leaderboard
 
 # Data flow control
-nugget_depends_on_responses: true # Pass responses to create_nuggets()
+# FIX: set to false — nugget creator only uses rag_topics, not responses
+nugget_depends_on_responses: false
 judge_uses_nuggets: true          # Pass nuggets to judge()
 judge_uses_qrels: true            # Pass qrels to judge()
 qrels_uses_nuggets: true        # Pass nuggets to create_qrels()
@@ -50,7 +51,7 @@ settings:
 # Settings for individual phases. These override shared settings.
 
 nugget_settings:
-  questions_per_topic: 3          # Number of questions to generate per topic
+  max_nuggets: 10
 
 qrels_settings:
   grade_range: [0, 3]             # Min and max relevance grades
@@ -71,7 +72,7 @@ variants:
   # Stricter grading with more nuggets
   strict:
     nugget_settings:
-      questions_per_topic: 5
+      max_nuggets: 5
     judge_settings:
       keyword_bonus: 0.1
 
@@ -104,7 +105,8 @@ sweeps:
 
   # Full grid search: questions x bonus
   grid-search:
+    # FIX: was questions_per_topic (silently ignored); code reads max_nuggets
     nugget_settings:
-      questions_per_topic: [2, 3, 5]
+      max_nuggets: [2, 3, 5]
     judge_settings:
       keyword_bonus: [0.1, 0.2, 0.3]
