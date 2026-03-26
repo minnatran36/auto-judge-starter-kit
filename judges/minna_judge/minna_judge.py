@@ -113,8 +113,19 @@ class MinnaNuggetCreator:
             )
             try:
                 parsed = json.loads(result.text)
-            except (json.JSONDecodeError, AttributeError):
+                if not isinstance(parsed, list):
+                    print(f"WARNING: LLM returned non-list for topic {topic.request_id}: {type(parsed)}")
+                    parsed = []
+            except (json.JSONDecodeError, AttributeError) as e:
+                print(f"WARNING: Failed to parse LLM response for topic {topic.request_id}: {e}")
+                print(f"  Raw response: {getattr(result, 'text', None)!r:.200}")
                 parsed = []
+
+            # Fallback: if no nuggets were generated, just grab the question
+            if not parsed:
+                fallback_q = topic.problem_statement or topic.title or f"What is the answer to topic {topic.request_id}?"
+                print(f"WARNING: Using fallback nugget for topic {topic.request_id}")
+                parsed = [fallback_q]
 
             questions = []
             for item in parsed[:limit]:
