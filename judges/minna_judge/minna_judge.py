@@ -28,12 +28,40 @@ from autojudge_base.nugget_data import (
     NuggetQuestion,
 )
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from sentence_transformers import SentenceTransformer
 from .pairwise_judge import PairwisePreferenceJudge, pick_anchors
 
 # fix2-3: swapped generic NLI model for RAG-specific hallucination detection model
 # old: nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
-nli_model = CrossEncoder("vectara/hallucination_evaluation_model", trust_remote_code=True)
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import torch
+
+class _VectaraHHEM:
+    """Lightweight wrapper around HHEMv2 that exposes a .predict() interface
+    compatible with sentence_transformers.CrossEncoder."""
+
+    def __init__(self, model_name: str = "vectara/hallucination_evaluation_model"):
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self._model = AutoModelForSequenceClassification.from_pretrained(
+            model_name, trust_remote_code=True
+        )
+        self._model.eval()
+
+    def predict(self, sentence_pairs, batch_size: int = 32):
+        scores = []
+        for i in range(0, len(sentence_pairs), batch_size):
+            batch = sentence_pairs[i:i + batch_size]
+            inputs = self._tokenizer(
+                [p[0] for p in batch], [p[1] for p in batch],
+                return_tensors="pt", padding=True, truncation=True,
+            )
+            with torch.no_grad():
+                logits = self._model(**inputs).logits
+            # HHEMv2 outputs a single score (0-1) for factual consistency
+            scores.extend(torch.sigmoid(logits[:, 0]).cpu().tolist())
+        return scores
+
+nli_model = _VectaraHHEM()
 
 # fix2-4: sentence embedding model for claim deduplication
 _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
