@@ -33,7 +33,7 @@ from .pairwise_judge import PairwisePreferenceJudge, pick_anchors
 
 # fix2-3: swapped generic NLI model for RAG-specific hallucination detection model
 # old: nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoModelForSequenceClassification, T5Tokenizer
 import torch
 
 class _VectaraHHEM:
@@ -41,9 +41,7 @@ class _VectaraHHEM:
     compatible with sentence_transformers.CrossEncoder."""
 
     def __init__(self, model_name: str = "vectara/hallucination_evaluation_model"):
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            model_name, trust_remote_code=True, use_fast=False
-        )
+        self._tokenizer = T5Tokenizer.from_pretrained(model_name)
         self._model = AutoModelForSequenceClassification.from_pretrained(
             model_name, trust_remote_code=True
         )
