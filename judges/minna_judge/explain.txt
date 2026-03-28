@@ -4,3 +4,27 @@ so that when LLM later check, we can have ground truth
 -- but this only concerns factual aspects, thus only ask for subquestions only (more flexible)
 
 nugget banks are empty for topics 1113 and 1115???
+
+HOW TO APPLY MACHINE LEARNING?
+
+Pairwise preference with anchor
+originally per q1, a > b > c > d
+pick a as anchor
+then compare (a, b), (a, c), (a, d)
+in each comparison, e.g (a, b)
+
+Compare Response B to the reference Response A.
+
+Pick ONE:
+  Better: Response B is better than Response A
+  Equal: Response B is about equal to Response A  
+  Slightly Worse: Response B is slightly worse than Response A
+  Worse: Response B is worse than Response A
+
+ANCHOR PAIRWISE PREFEERENCE
+read a file like minna_judge.eval.txt 
+then filter only the final measurement, 
+then from each question pick the system with the highest score 
+for anchor later on
+
+
