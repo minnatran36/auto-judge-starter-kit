@@ -22,8 +22,8 @@ create_qrels: true                # Call create_qrels() to generate relevance ju
 judge: true                       # Call judge() to produce leaderboard
 
 # Data flow control
-# FIX: set to false — nugget creator only uses rag_topics, not responses
-nugget_depends_on_responses: false
+# Nugget creator uses responses to collect diverse samples for context
+nugget_depends_on_responses: true
 judge_uses_nuggets: true          # Pass nuggets to judge()
 judge_uses_qrels: true            # Pass qrels to judge()
 qrels_uses_nuggets: true        # Pass nuggets to create_qrels()
