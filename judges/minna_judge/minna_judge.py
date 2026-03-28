@@ -41,7 +41,9 @@ class _VectaraHHEM:
     compatible with sentence_transformers.CrossEncoder."""
 
     def __init__(self, model_name: str = "vectara/hallucination_evaluation_model"):
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            model_name, trust_remote_code=True, use_fast=False
+        )
         self._model = AutoModelForSequenceClassification.from_pretrained(
             model_name, trust_remote_code=True
         )
