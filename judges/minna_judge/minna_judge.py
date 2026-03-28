@@ -33,7 +33,7 @@ from .pairwise_judge import PairwisePreferenceJudge, pick_anchors
 
 # fix2-3: swapped generic NLI model for RAG-specific hallucination detection model
 # old: nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
-nli_model = CrossEncoder("vectara/hallucination_evaluation_model")
+nli_model = CrossEncoder("vectara/hallucination_evaluation_model", trust_remote_code=True)
 
 # fix2-4: sentence embedding model for claim deduplication
 _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
