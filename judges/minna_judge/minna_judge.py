@@ -28,39 +28,12 @@ from autojudge_base.nugget_data import (
     NuggetQuestion,
 )
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
-from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForSequenceClassification, T5Tokenizer
-import torch
+from sentence_transformers import CrossEncoder, SentenceTransformer
 from .pairwise_judge import PairwisePreferenceJudge, pick_anchors
 
-# fix2-3: swapped generic NLI model for RAG-specific hallucination detection model
-# old: nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
-class _VectaraHHEM:
-    """Wrapper around HHEMv2 with .predict() matching CrossEncoder interface."""
-
-    def __init__(self):
-        # Load tokenizer from the base T5 model (HHEMv2 is flan-t5-base based)
-        self._tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
-        self._model = AutoModelForSequenceClassification.from_pretrained(
-            "vectara/hallucination_evaluation_model", trust_remote_code=True
-        )
-        self._model.eval()
-
-    def predict(self, sentence_pairs, batch_size: int = 32):
-        scores = []
-        for i in range(0, len(sentence_pairs), batch_size):
-            batch = sentence_pairs[i:i + batch_size]
-            inputs = self._tokenizer(
-                [p[0] for p in batch], [p[1] for p in batch],
-                return_tensors="pt", padding=True, truncation=True,
-            )
-            with torch.no_grad():
-                logits = self._model(**inputs).logits
-            # HHEMv2 outputs a single score (0-1) for factual consistency
-            scores.extend(torch.sigmoid(logits[:, 0]).cpu().tolist())
-        return scores
-
-nli_model = _VectaraHHEM()
+# Reverted to nli-deberta: vectara/hallucination_evaluation_model has persistent
+# compatibility issues with current transformers/sentence-transformers versions.
+nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 
 # fix2-4: sentence embedding model for claim deduplication
 _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -472,14 +445,8 @@ class MinnaLeaderboardJudge:
 
             for (key, doc_id, claim), score in zip(pair_index, all_nli_scores):
                 key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
-                # fix2-3: vectara model outputs a single score (0-1) where
-                # higher = more consistent/factual. Threshold at 0.5.
-                # old (nli-deberta): raw_nli = 1 if score[1] > 0.0 else 0
-                if isinstance(score, (list, np.ndarray)):
-                    # fallback if model returns array
-                    raw_nli = 1 if float(score[0]) > 0.5 else 0
-                else:
-                    raw_nli = 1 if float(score) > 0.5 else 0
+                # nli-deberta outputs [contradiction, entailment, neutral] logits
+                raw_nli = 1 if score[1] > 0.0 else 0
                 nli_scores_cache[key_str] = raw_nli
                 if raw_nli == 1:
                     score_dict[(key, claim)] = 1
