@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# VERSION 4
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 import asyncio
@@ -42,6 +43,7 @@ _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("COMPLETENESS_SCORE"),
     MeasureSpec("ATTRIBUTION_SCORE"),
+    MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("FINAL_SCORE"),
     MeasureSpec("PAIRWISE_SCORE"),
 ))
@@ -453,6 +455,76 @@ class MinnaLeaderboardJudge:
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
+        # ── Stage 2b: Citation accuracy ──────────────────────────────────
+        # For each response fragment, check if the cited docs actually
+        # support the fragment text (not just any doc in the collection).
+        citation_cache_path = f"{filebase}.citation_cache.json"
+        citation_cache = load_cache(citation_cache_path)
+
+        cite_pairs: List[Tuple[str, str]] = []
+        cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
+        # (run_id, topic_id), fragment_index
+
+        # Track per-response citation info: {key: (supported_count, total_cited_fragments)}
+        citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
+
+        for response in responses:
+            if not response.responses:
+                continue
+            key = (response.metadata.run_id, response.metadata.topic_id)
+            docs = response.documents or {}
+
+            supported = 0
+            total_cited = 0
+
+            for frag_idx, fragment in enumerate(response.responses):
+                # Get cited doc IDs from this fragment
+                cited_ids = []
+                if fragment.citations:
+                    if isinstance(fragment.citations, dict):
+                        cited_ids = list(fragment.citations.keys())
+                    elif isinstance(fragment.citations, list):
+                        cited_ids = [str(c) for c in fragment.citations]
+
+                if not cited_ids:
+                    continue  # fragment has no citations, skip
+
+                total_cited += 1
+                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+
+                if cache_key in citation_cache:
+                    if citation_cache[cache_key] == 1:
+                        supported += 1
+                    continue
+
+                # Check if any of the cited docs support this fragment
+                frag_text = fragment.text
+                for cid in cited_ids:
+                    if cid in docs:
+                        cite_pairs.append((docs[cid].text, frag_text))
+                        cite_pair_index.append((key, frag_idx))
+                        break  # one NLI check per fragment (against first matching cited doc)
+
+            citation_info[key] = (supported, total_cited)
+
+        # Run NLI on citation pairs
+        if cite_pairs:
+            for i in range(0, len(cite_pairs), CHUNK_SIZE):
+                chunk_scores = nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
+                for j, score in enumerate(chunk_scores):
+                    idx = i + j
+                    key, frag_idx = cite_pair_index[idx]
+                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+                    # nli-deberta: [contradiction, entailment, neutral]
+                    # Use stricter threshold: entailment must be the dominant class
+                    is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
+                    citation_cache[cache_key] = is_supported
+                    if is_supported:
+                        prev_sup, prev_total = citation_info[key]
+                        citation_info[key] = (prev_sup + 1, prev_total)
+
+        save_cache(citation_cache, citation_cache_path)
+
         # ── Stage 3: Pairwise preference evaluation + score aggregation ──
 
         # Collect FINAL_SCOREs for anchor selection
@@ -462,16 +534,10 @@ class MinnaLeaderboardJudge:
             topic_id = response.metadata.topic_id
             text = response.get_report_text()
             text_id = doc_id_md5(text)
-            claim_list = claims.get(key, [])
-            if claim_list:
-                attr = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list)
-            else:
-                attr = 0
             comp = qrels_dict.get((topic_id, text_id), 0) / 3.0
-            # fix2-1: use multiplicative formula instead of fixed 50/50 average
-            # this penalizes systems good at only one dimension
-            # old: original_scores[key] = 0.5 * (comp + attr)
-            original_scores[key] = comp * attr
+            cite_sup, cite_total = citation_info.get(key, (0, 0))
+            ca = cite_sup / cite_total if cite_total > 0 else 0.0
+            original_scores[key] = comp * ca
 
         anchors = pick_anchors(original_scores)
 
@@ -500,9 +566,11 @@ class MinnaLeaderboardJudge:
             completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
             pairwise_val = pairwise_scores.get(key, 0.0)
 
-            # fix2-1: FINAL_SCORE uses multiplicative formula
-            # old: 0.5 * (completeness + attribution)
-            final = completeness * attribution
+            # Citation accuracy: fraction of cited fragments supported by their cited doc
+            cite_sup, cite_total = citation_info.get(key, (0, 0))
+            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
+
+            final = completeness * cite_acc
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -510,6 +578,7 @@ class MinnaLeaderboardJudge:
                 values={
                     "COMPLETENESS_SCORE": completeness,
                     "ATTRIBUTION_SCORE": attribution,
+                    "CITATION_ACCURACY": cite_acc,
                     "FINAL_SCORE": final,
                     "PAIRWISE_SCORE": pairwise_val,
                 },
