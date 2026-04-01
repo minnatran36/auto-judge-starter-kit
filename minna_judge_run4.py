@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# VERSION 5
+# VERSION 4
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 import asyncio
@@ -35,7 +35,6 @@ nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("COMPLETENESS_SCORE"),
-    MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("FINAL_SCORE"),
     MeasureSpec("PAIRWISE_SCORE"),
@@ -305,12 +304,7 @@ class MinnaLeaderboardJudge:
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
         filebase = kwargs.get("filebase", "output-kiddie/minna_judge")
-        # Use run3 caches for claims and NLI attribution (already computed)
-        run3_base = filebase.replace("minna_judge", "minna_judge_run3")
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
-        full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
-        full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
-        backend = OpenAIMinimaLlm(full_config)
         responses = list(rag_responses)
 
         qrels_dict: Dict[Tuple[str, str], int] = {}
@@ -318,107 +312,19 @@ class MinnaLeaderboardJudge:
             for row in qrels.rows:
                 qrels_dict[(row.topic_id, row.doc_id)] = row.grade
 
-        # ── Stage 1: Claims extraction (from run3 cache) ────────────────
-        claims_cache_path = f"{run3_base}.claims_cache.json"
-        claims_cache = load_cache(claims_cache_path)
-        requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
-
-        for response in responses:
-            topic_id = response.metadata.topic_id
-            key = f"{response.metadata.run_id}_{topic_id}"
-            if key in claims_cache:
-                continue
-            text = response.get_report_text()
-            requests_info.append((
-                response.metadata.run_id, topic_id,
-                MinimaLlmRequest(
-                    request_id=f"{response.metadata.run_id}_{topic_id}",
-                    messages=[
-                        {"role": "system", "content": (
-                            "You are a claim extractor. Break this response into specific claims that "
-                            "could be verified against a source document. Each claim should be a single, "
-                            "self-contained statement. Include all types: facts, opinions, predictions, "
-                            "and hedged statements. For hedged claims, preserve the hedging language. "
-                            "Return ONLY a JSON array of strings. "
-                            "Example: [\"The war started in 1914.\", "
-                            "\"Everybody in the family agreed that it was a bad meal.\"] "
-                        )},
-                        {"role": "user", "content": f"Response: {text}"},
-                    ],
-                    temperature=0.3,
-                )
-            ))
-
-        results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
-
-        claims: Dict[Tuple[str, str], List[str]] = {}
-        for key, value in claims_cache.items():
-            r_id, t_id = key.split("_", 1)
-            claims[(r_id, t_id)] = value
-
-        for (run_id, topic_id, _), result in zip(requests_info, results):
-            key = f"{run_id}_{topic_id}"
-            try:
-                parsed = json.loads(result.text)
-            except (json.JSONDecodeError, AttributeError):
-                parsed = []
-            parsed = [c for c in parsed if isinstance(c, str) and len(c.strip()) >= 10]
-            claims[(run_id, topic_id)] = parsed
-            claims_cache[key] = parsed
-
-        save_cache(claims_cache, claims_cache_path)
-
-        # ── Stage 2a: Attribution score (claim × all docs, from cache) ───
-        nli_scores_cache_path = f"{run3_base}.nli_scores_cache.json"
-        nli_scores_cache = load_cache(nli_scores_cache_path)
-        score_dict: Dict[Tuple[Tuple[str, str], str], int] = {}
-
-        pairs: List[Tuple[str, str]] = []
-        pair_index: List[Tuple[Tuple[str, str], str, str]] = []
-
-        for response in responses:
-            if not response.documents:
-                continue
-            key = (response.metadata.run_id, response.metadata.topic_id)
-            for claim in claims.get(key, []):
-                claim_supported = False
-                uncached_docs: List[Tuple[str, Any]] = []
-                for doc_id, doc in response.documents.items():
-                    key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
-                    if key_str in nli_scores_cache:
-                        if nli_scores_cache[key_str] == 1:
-                            claim_supported = True
-                    else:
-                        uncached_docs.append((doc_id, doc))
-                score_dict[(key, claim)] = 1 if claim_supported else 0
-                if not claim_supported:
-                    for doc_id, doc in uncached_docs:
-                        pairs.append((doc.text, claim))
-                        pair_index.append((key, doc_id, claim))
-
         CHUNK_SIZE = 500
-        if pairs:
-            for i in range(0, len(pairs), CHUNK_SIZE):
-                chunk_scores = nli_model.predict(pairs[i:i + CHUNK_SIZE])
-                for j, score in enumerate(chunk_scores):
-                    idx = i + j
-                    key, doc_id, claim = pair_index[idx]
-                    key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
-                    # vectara-compatible: score[1] > 0.0 for deberta logits
-                    raw_nli = 1 if score[1] > 0.0 else 0
-                    nli_scores_cache[key_str] = raw_nli
-                    if raw_nli == 1:
-                        score_dict[(key, claim)] = 1
 
-        save_cache(nli_scores_cache, nli_scores_cache_path)
-
-        # ── Stage 2b: Citation accuracy (fragment × cited docs) ──────────
+        # ── Stage 2b: Citation accuracy ──────────────────────────────────
+        # For each response fragment, check if the cited docs actually
+        # support the fragment text (not just any doc in the collection).
         citation_cache_path = f"{filebase}.citation_cache.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
-        cite_pair_index: List[Tuple[Tuple[str, str], int, str]] = []
+        cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
+        # (run_id, topic_id), fragment_index
 
+        # Track per-response citation info: {key: (supported_count, total_cited_fragments)}
         citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
 
         for response in responses:
@@ -431,6 +337,7 @@ class MinnaLeaderboardJudge:
             total_cited = 0
 
             for frag_idx, fragment in enumerate(response.responses):
+                # Get cited doc IDs from this fragment
                 cited_ids = []
                 if fragment.citations:
                     if isinstance(fragment.citations, dict):
@@ -439,7 +346,7 @@ class MinnaLeaderboardJudge:
                         cited_ids = [str(c) for c in fragment.citations]
 
                 if not cited_ids:
-                    continue
+                    continue  # fragment has no citations, skip
 
                 total_cited += 1
                 cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
@@ -449,45 +356,37 @@ class MinnaLeaderboardJudge:
                         supported += 1
                     continue
 
-                # Check ALL cited docs (not just first)
+                # Check if any of the cited docs support this fragment
                 frag_text = fragment.text
                 for cid in cited_ids:
                     if cid in docs:
                         cite_pairs.append((docs[cid].text, frag_text))
-                        cite_pair_index.append((key, frag_idx, cid))
+                        cite_pair_index.append((key, frag_idx))
+                        break  # one NLI check per fragment (against first matching cited doc)
 
             citation_info[key] = (supported, total_cited)
 
-        # Run NLI on citation pairs — a fragment is supported if ANY cited doc entails it
+        # Run NLI on citation pairs
         if cite_pairs:
-            already_supported = set()
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
                 chunk_scores = nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
                 for j, score in enumerate(chunk_scores):
                     idx = i + j
-                    key, frag_idx, cid = cite_pair_index[idx]
+                    key, frag_idx = cite_pair_index[idx]
                     cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-
-                    if cache_key in already_supported:
-                        continue
-
-                    # Relaxed threshold: entailment > neutral
-                    is_supported = 1 if score[1] > score[2] else 0
+                    # nli-deberta: [contradiction, entailment, neutral]
+                    # Use stricter threshold: entailment must be the dominant class
+                    is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
+                    citation_cache[cache_key] = is_supported
                     if is_supported:
-                        already_supported.add(cache_key)
-                        citation_cache[cache_key] = 1
                         prev_sup, prev_total = citation_info[key]
                         citation_info[key] = (prev_sup + 1, prev_total)
-
-            # Mark unsupported fragments (checked all docs, none supported)
-            for key, frag_idx, cid in cite_pair_index:
-                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-                if cache_key not in citation_cache:
-                    citation_cache[cache_key] = 0
 
         save_cache(citation_cache, citation_cache_path)
 
         # ── Stage 3: Pairwise preference evaluation + score aggregation ──
+
+        # Collect FINAL_SCOREs for anchor selection
         original_scores: Dict[Tuple[str, str], float] = {}
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -497,7 +396,7 @@ class MinnaLeaderboardJudge:
             comp = qrels_dict.get((topic_id, text_id), 0) / 3.0
             cite_sup, cite_total = citation_info.get(key, (0, 0))
             ca = cite_sup / cite_total if cite_total > 0 else 0.0
-            original_scores[key] = 0.5 * (comp + ca)
+            original_scores[key] = comp * ca
 
         anchors = pick_anchors(original_scores)
 
@@ -507,10 +406,10 @@ class MinnaLeaderboardJudge:
             rag_topics=rag_topics,
             llm_config=llm_config,
             anchors=anchors,
-            filebase=run3_base,
+            filebase=filebase,
         )
 
-        # Build final leaderboard
+        # Build final leaderboard with all 4 measures
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -518,26 +417,20 @@ class MinnaLeaderboardJudge:
             text = response.get_report_text()
             text_id = doc_id_md5(text)
 
-            claim_list = claims.get(key, [])
-            if claim_list:
-                attribution = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list)
-            else:
-                attribution = 0
-
             completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
             pairwise_val = pairwise_scores.get(key, 0.0)
 
+            # Citation accuracy: fraction of cited fragments supported by their cited doc
             cite_sup, cite_total = citation_info.get(key, (0, 0))
             cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
 
-            final = 0.5 * (completeness + cite_acc)
+            final = completeness * cite_acc
 
             builder.add(
                 run_id=response.metadata.run_id,
                 topic_id=topic_id,
                 values={
                     "COMPLETENESS_SCORE": completeness,
-                    "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
                     "FINAL_SCORE": final,
                     "PAIRWISE_SCORE": pairwise_val,
