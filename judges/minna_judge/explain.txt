@@ -3,6 +3,7 @@ HOW TO APPLY MACHINE LEARNING?
 
 WHAT WORKS BEST:
 nli_model = _VectaraHHEM()
+run2 = 0.5(completeness + attribution)
 
 ❤️ Did consider the possibility of asking LLM for both question & answer for each subquestions
 so that when LLM later check, we can have ground truth
