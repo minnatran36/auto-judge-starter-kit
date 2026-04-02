@@ -36,4 +36,8 @@ cite_pair_index: List[i] = (run_id, topic_id), doc_id, fragment text)
 
 citation_info: Dict[key] = (# supported fragments, # cited fragments)
 
+
+WHAT WORKS BEST:
+nli_model = _VectaraHHEM()
+
  

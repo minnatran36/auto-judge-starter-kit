@@ -1,0 +1,40 @@
+1. KENDALL
+btw 2 rankings = (concordant pairs - discordant)/total pairs
+ideally, base = nC2
+
+assumptions?
+each pair equally important, not distinguish btw distance/pairs high on the ranking
+not penalise distance 
+
+❤️️ why does Kendal  perform better than Spearman when sample small?
+
+2. KENDALL @15
+kendall but only focus on top 15
+
+❤️️ kendal@k = noisy at small k, why?
+
+3. SPEARMAN
+ρ = 1− 6∑d^2​​/n(n^2−1)
+
+Item    True rank   System rankdid_i
+A       1              1
+B       2              4
+C       3              3
+D       4              2
+E       5              5
+
+ρ = 1 - 6(2^2 + 2^2)/5.(5^2-1)
+
+⥤ if 1 system catastrophically wrong (high difference btw the 2 ends, slight difference in-btw)
+destroy the whole thing (square)
+
+4. TAUAP_b
+5. PEARSON
+6. ENTAILMENT (NLI-DEBERTA)
+7. HHEM SCORE (VECTARA)
+8. NUGGET_BASED: CORRECT_NUGGETS, NUGGET_COVERAGE, F1
+9. CITATION_BASED: CITATION_SUPPORTED, CORRECTLY_CITED_SENTENCES, SENTENCE_SUPPORT, SUPPORTING_CITATION
+10. RELEVANT_CITATIONS
+11. LENGTH_BASED: CHARACTER_COUNT, SENTENCES
+
+
