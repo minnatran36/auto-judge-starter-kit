@@ -1,43 +1,86 @@
-Note1:
-Did consider the possibility of asking LLM for both question & answer for each subquestions
-so that when LLM later check, we can have ground truth
--- but this only concerns factual aspects, thus only ask for subquestions only (more flexible)
-
-nugget banks are empty for topics 1113 and 1115???
-
 HOW TO APPLY MACHINE LEARNING?
-
-Pairwise preference with anchor
-originally per q1, a > b > c > d
-pick a as anchor
-then compare (a, b), (a, c), (a, d)
-in each comparison, e.g (a, b)
-
-Compare Response B to the reference Response A.
-
-Pick ONE:
-  Better: Response B is better than Response A
-  Equal: Response B is about equal to Response A  
-  Slightly Worse: Response B is slightly worse than Response A
-  Worse: Response B is worse than Response A
-
-ANCHOR PAIRWISE PREFEERENCE
-read a file like minna_judge.eval.txt 
-then filter only the final measurement, 
-then from each question pick the system with the highest score 
-for anchor later on
-
-DEF JUDGE()
-
- ── Stage 2b: Citation accuracy (fragment × cited docs) ──────────
-cite_pairs: List[i] = (doc_id text, fragment text)
-cite_pair_index: List[i] = (run_id, topic_id), doc_id, fragment text)
-→ send cite_pairs to LLM, matching index to cite_pair_index to find their ids
-
-citation_info: Dict[key] = (# supported fragments, # cited fragments)
 
 
 WHAT WORKS BEST:
 nli_model = _VectaraHHEM()
 
+❤️ Did consider the possibility of asking LLM for both question & answer for each subquestions
+so that when LLM later check, we can have ground truth
+-- but this only concerns factual aspects, thus only ask for subquestions only (more flexible)
+
+
+❤️ High attribution goes well with ground truth ranking, but not citation support
+but if a system worth its salt, both need to rank/correlate well with ground truth. why?
+attribution, more data -- 20% systems score 0
+citation support -- 60% score 0
+⥤ how about we just focus on the data that has non zero attribution & citation -- is there anyway to just measure this group reliably with ground truth?
+small percentage, 30% fit -- not significant enough
+⥤ the failure of ciation measure, could it be that for a response, each sentence may not have citation per se,
+but the whole paragraph combined can have meaning overall supported by docs? this may be true in case of opinions, descriptions?
+let's look at the fragment, is each fragment = a sentence or its it a group of sentences?
+here: most fragment = a sentence -- need higher granulity
+
+⥤ how about run my code on another dataset?
+TREC RAG 2024?
+
+⥤ we also have @15 and @5 of kendall, can we use our data, pick the 5 best or 15 best 
+-- based on the @15 & @5 to reverse engineer to approximate the score of the real best 5 or best 15?
+
  
+⥤ normally what's consider high score in RAG? how much do they normally perform?
+
+⥤ anyway to make llm pick pairwise efificiently/briefly by itself w/o anchors?
+
+❤️ There are cases where final score, best = 0 (e.g radish) -- pairwise use this as anchor, wrong
+dead topic = where completeness score for all systems 0, should remove these?
+completeness score = 0, meaning LLM cannot generate any nugget from the question
+-- what makes a question generate 0 nugget? anything related to the type of question?
+
+the data presented a certain way -- may affect scores if not examined thoroughly 
+-- any ways to detect/fix this
+
+❤️ completeness = breakable into subquestions -- favor fact-based, 
+if low completeness score need to be rank differently?
+does completeness correlate with number of docs cited? reverse
+
+does completeness correlate with number of subquestions? maybe not since we cap no. nuggets = 10?
+
+
+Low completeness topics have MORE documents and citations, not fewer
+                          Avg Docs	  Avg Citations	  Avg Fragments
+High completeness (≥0.55)	10.6	        24.2	          20.8
+Low completeness (≤0.40)	16.5	        48.7	          44.7
+Ratio (high/low)	        0.65x	        0.50x	          0.47x
+Low completeness topics have 2x more citations and fragments than high completeness topics.
+
+in question files, 
+limit	  Avg Completeness	n
+2000	  0.540	            61 topics
+10000	  0.475	            61 topics
+⥤ does this mean length = lower completeness? no
+❤️ across all runs, calculate the length of each response 
+& check how they correlate to completeness, attribution, citation?
+Length bin	  Avg length	  Completeness	Attribution	Citation	  Final
+Q1 (shortest)	972 chars	    0.294	        0.191	        0.026	    0.160
+Q2	          1,824 chars	  0.481	        0.279	        0.069	    0.275
+Q3	          3,008 chars	  0.542	        0.222	        0.044	    0.293
+Q4 (longest)	8,972 chars	  0.435	        0.348	        0.049	    0.242
+It's an inverted-U, too long or too short, low completeness
+
+
+TOPICS
+for this data, problem_statement the same across topics.
+different limit or backgrounds
+"Female Crane Operators":
+1025: female high school student + limit=2000
+1026: female high school student + limit=10000
+1027: HR specialist at construction company + limit=2000
+1028: HR specialist at construction company + limit=10000
+
+nugget banks are empty for topics 1113 and 1115???
+
+How many types of questions in general?
+1. fact-based, or can be extracted into provable/citable claims
+2. synthesized answer, where each sentence/paragraph may not directly cite evidence but the overall
+meaning of the answer concurr with the docs? examples?
+or answer that tells a story

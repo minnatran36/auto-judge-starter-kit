@@ -78,14 +78,18 @@ def save_cache(data, path):
 
 
 def pick_anchors(original_scores: Dict[Tuple[str, str], float]) -> Dict[str, str]:
-    """Pick best system per topic → {topic_id: run_id}"""
+    """Pick best system per topic → {topic_id: run_id}.
+    Skip topics where ALL systems score 0 — pairwise comparisons
+    against a zero-quality anchor are meaningless noise."""
     by_topic: Dict[str, Dict[str, float]] = defaultdict(dict)
     for (run_id, topic_id), score in original_scores.items():
         by_topic[topic_id][run_id] = score
-    return {
-        topic_id: max(runs, key=runs.get)
-        for topic_id, runs in by_topic.items()
-    }
+    anchors = {}
+    for topic_id, runs in by_topic.items():
+        best_score = max(runs.values())
+        if best_score > 0:
+            anchors[topic_id] = max(runs, key=runs.get)
+    return anchors
 
 
 #---------------------- PAIRWISE JUDGE ----------------------

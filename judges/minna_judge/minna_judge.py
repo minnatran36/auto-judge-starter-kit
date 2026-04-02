@@ -550,7 +550,9 @@ class MinnaLeaderboardJudge:
                 attribution = 0
 
             completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
-            pairwise_val = pairwise_scores.get(key, 0.0)
+            # Use neutral midpoint (1.0) for topics skipped by pairwise
+            # (zero-best topics have no meaningful anchor to compare against)
+            pairwise_val = pairwise_scores.get(key, 1.0)
 
             cite_sup, cite_total = citation_info.get(key, (0, 0))
             cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0

@@ -37,4 +37,3 @@ destroy the whole thing (square)
 10. RELEVANT_CITATIONS
 11. LENGTH_BASED: CHARACTER_COUNT, SENTENCES
 
-

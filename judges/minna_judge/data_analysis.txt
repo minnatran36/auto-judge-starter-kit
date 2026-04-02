@@ -1,0 +1,23 @@
+GENERAL
+61 systems
+122 topics
+
+lichen: 61 topics only
+radish: 25 topics only
+ulva: 244 records but only 123 unique topics (messy, 2 responses per topics, 1 extra topic no other has)
+
+anise = ant = emu, identical
+
+RESPONSE:
+{
+  "responses": [{"text": "...", "citations": ["doc_id_1"]}],
+   or "answer": [{"text": "...", "citations": ["doc_id_1"]}],
+
+  "references" -- optional, some don't have or empty: ["doc_id_A", "doc_id_B", "doc_id_C"],
+  "documents": {"doc_id_1": {"id": "...", "text": "...", "url": "..."}}
+}
+there are systems where there's documents but no references
+but when they do, both of them = the same (51 systems for both, docs only 10 systems)
+
+pairwise the best? completness drives most scores
+how about pairwise just based on completeness?
