@@ -27,36 +27,10 @@ from autojudge_base.nugget_data import (
     NuggetQuestion,
 )
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
-from transformers import AutoModelForSequenceClassification, T5Tokenizer
-import torch
+from sentence_transformers import CrossEncoder
 from .pairwise_judge import PairwisePreferenceJudge, pick_anchors
 
-
-class _VectaraHHEM:
-    """Wrapper around HHEMv2 with .predict() matching CrossEncoder interface."""
-
-    def __init__(self):
-        self._tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
-        self._model = AutoModelForSequenceClassification.from_pretrained(
-            "vectara/hallucination_evaluation_model", trust_remote_code=True
-        )
-        self._model.eval()
-
-    def predict(self, sentence_pairs, batch_size: int = 32):
-        scores = []
-        for i in range(0, len(sentence_pairs), batch_size):
-            batch = sentence_pairs[i:i + batch_size]
-            inputs = self._tokenizer(
-                [p[0] for p in batch], [p[1] for p in batch],
-                return_tensors="pt", padding=True, truncation=True,
-            )
-            with torch.no_grad():
-                logits = self._model(**inputs).logits
-            scores.extend(torch.sigmoid(logits[:, 0]).cpu().tolist())
-        return scores
-
-
-nli_model = _VectaraHHEM()
+nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 
 
 MINIMAL_SPEC = LeaderboardSpec(measures=(
@@ -345,7 +319,7 @@ class MinnaLeaderboardJudge:
                 qrels_dict[(row.topic_id, row.doc_id)] = row.grade
 
         # ── Stage 1: Claims extraction (from run3 cache) ────────────────
-        claims_cache_path = f"{run3_base}.claims_newcache.json"
+        claims_cache_path = f"{run3_base}.claims_cache.json"
         claims_cache = load_cache(claims_cache_path)
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
 
@@ -395,7 +369,7 @@ class MinnaLeaderboardJudge:
         save_cache(claims_cache, claims_cache_path)
 
         # ── Stage 2a: Attribution score (claim × all docs, from cache) ───
-        nli_scores_cache_path = f"{run3_base}.nli_scores_newcache.json"
+        nli_scores_cache_path = f"{run3_base}.nli_scores_cache.json"
         nli_scores_cache = load_cache(nli_scores_cache_path)
         score_dict: Dict[Tuple[Tuple[str, str], str], int] = {}
 
@@ -430,8 +404,8 @@ class MinnaLeaderboardJudge:
                     idx = i + j
                     key, doc_id, claim = pair_index[idx]
                     key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
-                    # HHEM outputs single float (0-1), threshold at 0.5
-                    raw_nli = 1 if float(score) > 0.5 else 0
+                    # vectara-compatible: score[1] > 0.0 for deberta logits
+                    raw_nli = 1 if score[1] > 0.0 else 0
                     nli_scores_cache[key_str] = raw_nli
                     if raw_nli == 1:
                         score_dict[(key, claim)] = 1
@@ -439,7 +413,7 @@ class MinnaLeaderboardJudge:
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
         # ── Stage 2b: Citation accuracy (fragment × cited docs) ──────────
-        citation_cache_path = f"{filebase}.citation_newcache.json"
+        citation_cache_path = f"{filebase}.citation_cache.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
@@ -497,8 +471,8 @@ class MinnaLeaderboardJudge:
                     if cache_key in already_supported:
                         continue
 
-                    # HHEM: single float (0-1), threshold at 0.5
-                    is_supported = 1 if float(score) > 0.5 else 0
+                    # Relaxed threshold: entailment > neutral
+                    is_supported = 1 if score[1] > score[2] else 0
                     if is_supported:
                         already_supported.add(cache_key)
                         citation_cache[cache_key] = 1
