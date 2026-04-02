@@ -155,7 +155,6 @@ class MinnaNuggetCreator:
                 temperature=0.3,
             ))
 
-        results = asyncio.run(backend.run_batched(requests))
 
         for topic, result in zip(rag_topics, results):
             bank = NuggetBank(

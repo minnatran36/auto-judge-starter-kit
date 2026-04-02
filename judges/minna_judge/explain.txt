@@ -27,4 +27,13 @@ then filter only the final measurement,
 then from each question pick the system with the highest score 
 for anchor later on
 
+DEF JUDGE()
 
+ ── Stage 2b: Citation accuracy (fragment × cited docs) ──────────
+cite_pairs: List[i] = (doc_id text, fragment text)
+cite_pair_index: List[i] = (run_id, topic_id), doc_id, fragment text)
+→ send cite_pairs to LLM, matching index to cite_pair_index to find their ids
+
+citation_info: Dict[key] = (# supported fragments, # cited fragments)
+
+ 

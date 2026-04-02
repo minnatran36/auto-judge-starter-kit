@@ -77,21 +77,6 @@ def save_cache(data, path):
         json.dump(data, f)
 
 
-def load_original_scores(path: str, measure: str = "FINAL_SCORE") -> Dict[Tuple[str, str], float]:
-    """Parse eval.txt → {(run_id, topic_id): score}"""
-    scores: Dict[Tuple[str, str], float] = {}
-    with open(path) as f:
-        for line in f:
-            parts = line.strip().split("\t")
-            if len(parts) != 4:
-                continue
-            run_id, meas, topic_id, val = parts
-            if meas != measure or topic_id == "all":
-                continue
-            scores[(run_id, topic_id)] = float(val)
-    return scores
-
-
 def pick_anchors(original_scores: Dict[Tuple[str, str], float]) -> Dict[str, str]:
     """Pick best system per topic → {topic_id: run_id}"""
     by_topic: Dict[str, Dict[str, float]] = defaultdict(dict)
