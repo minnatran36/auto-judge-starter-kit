@@ -36,20 +36,22 @@ class _VectaraHHEM:
     """Wrapper around HHEMv2 with .predict() matching CrossEncoder interface."""
 
     def __init__(self):
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
         self._model = AutoModelForSequenceClassification.from_pretrained(
             "vectara/hallucination_evaluation_model", trust_remote_code=True
-        )
+        ).to(self._device)
         self._model.eval()
+        print(f"_VectaraHHEM: using device={self._device}")
 
-    def predict(self, sentence_pairs, batch_size: int = 32):
+    def predict(self, sentence_pairs, batch_size: int = 256):
         scores = []
         for i in range(0, len(sentence_pairs), batch_size):
             batch = sentence_pairs[i:i + batch_size]
             inputs = self._tokenizer(
                 [p[0] for p in batch], [p[1] for p in batch],
                 return_tensors="pt", padding=True, truncation=True,
-            )
+            ).to(self._device)
             with torch.no_grad():
                 logits = self._model(**inputs).logits
             scores.extend(torch.sigmoid(logits[:, 0]).cpu().tolist())

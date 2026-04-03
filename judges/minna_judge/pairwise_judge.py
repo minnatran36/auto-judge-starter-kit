@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Anchor-based pairwise preference judge.
-
 For each topic, uses a provided anchor (best system), then asks an LLM
 to compare every other system's response against the anchor.
 Results are mapped to numeric scores.
 
-fix2-5: each comparison is run twice with swapped positions (A/B) to
+each comparison is run twice with swapped positions (A/B) to
 counteract LLM positional bias. Final score = average of both directions.
 """
 
