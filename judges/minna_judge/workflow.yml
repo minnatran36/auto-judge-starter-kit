@@ -42,7 +42,7 @@ augment_report: false
 # Shared settings passed to all phases. Use {_name} for variant/sweep name.
 
 settings:
-  filebase: "minna_judge"    # Output filename base
+  filebase: "minna_judge_run7"    # Output filename base
 
 
 # =============================================================================
