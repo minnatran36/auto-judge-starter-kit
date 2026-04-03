@@ -1,6 +1,5 @@
 HOW TO APPLY MACHINE LEARNING?
 
-
 WHAT WORKS BEST:
 nli_model = _VectaraHHEM()
 run2 = 0.5(completeness + attribution)
@@ -85,3 +84,65 @@ How many types of questions in general?
 2. synthesized answer, where each sentence/paragraph may not directly cite evidence but the overall
 meaning of the answer concurr with the docs? examples?
 or answer that tells a story
+
+NUGGETS
+what needs to be covered? how does the response satisfy each subtopics? - my nugget, ok
+
+CITATIONS
+does the reponse cite document correctly? - my attribution & a bit of citation measure
+do the relevant documents retrieved answer the topic ? ⥤ "Do the retrieved documents answer the subquestions (nuggets)?"
+
+UMBRELA = read a question & read a text from doc 
+-- output grade = grade quality of doc/qrels
+but my qrels don't come from docs but directly from response (a bit misleading)
+
+WHAT NEED TO BE CONSIDERED?
+3 groups: questions   vs.    responses     vs. documents
+(question, docs) -- do docs cover the question?
+(question, response) -- does response cover the question? -- completeness score
+(response, docs) -- are these 2 related? minimize hallucination? 
+                 -- citation score (not much) & attribution score
+
+Anythng noticable about question with high/low citation score?
+guess: low citation score, value not derived much per sentence 
+
+❤️ Can relationship btw citation & attribution scores tell you about the types of questions?
+low citation, high attribution 
+⥤ response match documents generally (due to mostly general meaning?)
+high citation, high attribution 
+⥤ fact-based questions?
+high citation, low attribution
+⥤ may be not preferable either since meaning fragmented?
+don't want low citation, low attribution
+
+HIGH cite, HIGH attr (18 topics) — Fact-heavy, verifiable topics/their titles:
+"Quantum Computing Arms Race" 
+"Lionel Messi" 
+"Woolly mammoth extinction" 
+"ISS Air Leak" 
+"Greenland rare earth minerals" — deposits, value, who's interested
+Pattern: Who/what/when/where questions with specific factual answers. Claims extract cleanly, docs contain the same facts → both citation and attribution work.
+
+LOW cite, HIGH attr (6 topics) — Opinion/trend/cultural topics
+"Novelty Yoga Trends" 
+"Flat Earth Movement" 
+"The Labubu Phenomenon" 
+"MBS and Saudi Vision 2030" 
+
+HIGH cite, LOW attr (6 topics) — Narrow/technical topics
+"Energy transition in Middle East" 
+"Global Aircraft Forecast" 
+"Foreign investment in African countries" 
+"Little Mermaid Statue" 
+
+LOW cite, LOW attr (20 topics) — Broad + complex + niche
+"Rise and Decline of LiveJournal" — narrative history
+"Hagia Sophia Controversy" — political/religious debate
+"Ocean Acidification" — complex scientific processes
+"Pet AI Companions" — emerging/niche topic
+"Milei's Policy Agenda" — political analysis
+-- or could be just hallucination?
+
+❤️ Attribution asks: "are the claims in this response supported by the retrieved documents?" 
+-- system makes both response & retrieved documents, roundabout logic? 
+a better question = does the documents answer the subquestions?

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# VERSION 5
+# RUN7
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 import asyncio
@@ -60,11 +60,22 @@ nli_model = _VectaraHHEM()
 
 
 MINIMAL_SPEC = LeaderboardSpec(measures=(
-    MeasureSpec("COMPLETENESS_SCORE"),
-    MeasureSpec("ATTRIBUTION_SCORE"),
-    MeasureSpec("CITATION_ACCURACY"),
-    MeasureSpec("FINAL_SCORE"),
-    MeasureSpec("PAIRWISE_SCORE"),
+    MeasureSpec("COMPLETENESS_SCORE"),    
+    MeasureSpec("ATTRIBUTION_SCORE"),    
+    MeasureSpec("CITATION_ACCURACY"),     
+    MeasureSpec("RETRIEVAL_QUALITY"),     
+    # ── FINAL_SCORE variants  ──
+    MeasureSpec("FINAL_SCORE"),           # v1: (comp+ret+cite)
+    MeasureSpec("FINAL_SCORE_V2"),        # v2: (comp+attr+ret+cite)
+    MeasureSpec("FINAL_SCORE_V3"),        # v3: (comp dominates)
+    MeasureSpec("FINAL_SCORE_V4"),        # v4: (ret dominates)
+    MeasureSpec("FINAL_SCORE_V5"),        # v5: equal weight all 4 components
+    # ── Pairwise scores(each uses its own anchors) ──
+    MeasureSpec("PAIRWISE_SCORE"),        # pairwise for v1
+    MeasureSpec("PAIRWISE_SCORE_V2"),     # pairwise for v2
+    MeasureSpec("PAIRWISE_SCORE_V3"),     # pairwise for v3
+    MeasureSpec("PAIRWISE_SCORE_V4"),     # pairwise for v4
+    MeasureSpec("PAIRWISE_SCORE_V5"),     # pairwise for v5
 ))
 
 
@@ -128,7 +139,7 @@ class MinnaNuggetCreator:
             else:
                 context = topic.problem_statement
 
-            # fix2-6: include response samples in nugget prompt so nuggets
+            # include response samples in nugget prompt so nuggets
             # better discriminate between good and bad responses
             samples = response_samples.get(topic.request_id, [])
             if samples:
@@ -171,7 +182,7 @@ class MinnaNuggetCreator:
                 print(f"  Raw response: {getattr(result, 'text', None)!r:.200}")
                 parsed = []
 
-            # Fallback: if no nuggets were generated, just grab the question
+            # if no nuggets were generated, just grab the question
             if not parsed:
                 fallback_q = topic.problem_statement or topic.title or f"What is the answer to topic {topic.request_id}?"
                 print(f"WARNING: Using fallback nugget for topic {topic.request_id}")
@@ -228,8 +239,7 @@ class MinnaQrelsCreator:
                     response.metadata.run_id,
                     topic_id,
                     MinimaLlmRequest(
-                        # fix2-2: ask LLM to grade 0/1/2 instead of binary 0/1
-                        # for finer-grained completeness assessment
+                        # ask LLM to grade 0/1/2 instead of binary 0/1
                         request_id=f"{response.metadata.run_id}_{topic_id}_{nugget.question_id}",
                         messages=[
                             {"role": "system", "content": (
@@ -249,12 +259,9 @@ class MinnaQrelsCreator:
         scores = {}
 
         for (run_id, topic_id, _), result in zip(requests_info, results):
-            # fix2-2: parse 0/1/2 graded response instead of binary
             score = self._parse_graded(result)
             scores.setdefault((run_id, topic_id), []).append(score)
 
-        # fix2-2: use grade_range (0, 5) for finer granularity
-        # with 0-2 per nugget and up to 10 nuggets, we get much smoother grades
         max_grade = grade_range[1]
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -264,9 +271,8 @@ class MinnaQrelsCreator:
                 continue
 
             tallies = scores[key]
-            # fix2-2: average of 0-2 scores, scaled to grade range
-            # e.g. avg=1.5 out of 2.0 → grade = round(3 * 0.75) = 2
-            avg = sum(tallies) / (len(tallies) * 2.0)  # normalize to 0-1
+            # each nugget scored 0-2, 1/2 to normalize to 1
+            avg = sum(tallies) / (len(tallies) * 2.0)  
             grade = round(max_grade * avg)
             grade_records.append(GradeRecord(topic_id, text, grade))
 
@@ -274,7 +280,6 @@ class MinnaQrelsCreator:
         print(f"MinnaQrelsCreator: Created qrels for {len(grade_records)} responses")
         return qrels
 
-    # fix2-2: new graded parser replacing old binary parser
     def _parse_graded(self, result) -> int:
         """Parse 0/1/2 graded response from LLM."""
         try:
@@ -329,9 +334,7 @@ class MinnaLeaderboardJudge:
         **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
-        filebase = kwargs.get("filebase", "output-kiddie/minna_judge")
-        # Use run3 caches for claims and NLI attribution (already computed)
-        run3_base = filebase.replace("minna_judge", "minna_judge_run3")
+        filebase = kwargs.get("filebase", "output-kiddie/minna_judge_run7")
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
@@ -343,8 +346,101 @@ class MinnaLeaderboardJudge:
             for row in qrels.rows:
                 qrels_dict[(row.topic_id, row.doc_id)] = row.grade
 
-        # ── Stage 1: Claims extraction (from run3 cache) ────────────────
-        claims_cache_path = f"{run3_base}.claims_newcache.json"
+        
+        retrieval_cache_path = f"{filebase}.retrieval_quality_cache.json"
+        retrieval_cache = load_cache(retrieval_cache_path)
+        # Each request checks one (system, topic, nugget) triple
+        retrieval_requests: List[Tuple[str, str, str, MinimaLlmRequest]] = []
+
+        retrieval_quality: Dict[Tuple[str, str], float] = {}
+
+        if nugget_banks:
+            for response in responses:
+                topic_id = response.metadata.topic_id
+                run_id = response.metadata.run_id
+                if topic_id not in nugget_banks.banks:
+                    continue
+                if not response.documents:
+                    continue
+
+                nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+
+                # Build a single "retrieval context" string from this system's
+                # docs for this topic. We truncate each doc to 1000 chars and
+                # cap at 20 docs to stay within LLM context limits.
+                doc_texts = []
+                for doc_id, doc in response.documents.items():
+                    doc_texts.append(doc.text[:1000])
+                combined_docs = "\n---\n".join(doc_texts[:20])
+
+                for nugget in nuggets:
+                    cache_key = f"{run_id}_{topic_id}_{nugget.question_id}"
+                    if cache_key in retrieval_cache:
+                        continue
+
+                    # Ask the LLM: do these docs answer this sub-question?
+                    # Graded 0/1/2 for consistency with the qrels grading scheme
+                    retrieval_requests.append((
+                        run_id, topic_id, nugget.question_id,
+                        MinimaLlmRequest(
+                            request_id=cache_key,
+                            messages=[
+                                {"role": "system", "content": (
+                                    "Do these retrieved documents contain information "
+                                    "that answers this question? Reply with a single number:\n"
+                                    "  2 = documents fully answer the question\n"
+                                    "  1 = documents partially answer the question\n"
+                                    "  0 = documents do not answer the question"
+                                )},
+                                {"role": "user", "content": (
+                                    f"Question: {nugget.question}\n\n"
+                                    f"Retrieved documents:\n{combined_docs}"
+                                )},
+                            ],
+                            temperature=0.0,
+                        )
+                    ))
+
+            if retrieval_requests:
+                print(f"RetrievalQuality: Sending {len(retrieval_requests)} LLM requests...")
+                ret_results = asyncio.run(backend.run_batched(
+                    [req for _, _, _, req in retrieval_requests]
+                ))
+                for (run_id, topic_id, nug_id, _), result in zip(retrieval_requests, ret_results):
+                    cache_key = f"{run_id}_{topic_id}_{nug_id}"
+                    # Parse graded 0/1/2 response (same logic as qrels grading)
+                    try:
+                        text = result.text.strip()
+                        score = 0
+                        for char in text:
+                            if char in ("0", "1", "2"):
+                                score = int(char)
+                                break
+                    except:
+                        score = 0
+                    retrieval_cache[cache_key] = score
+                save_cache(retrieval_cache, retrieval_cache_path)
+
+            # Aggregate: for each (run, topic), average the per-nugget scores
+            # and normalize to 0-1 (max per nugget is 2)
+            for response in responses:
+                topic_id = response.metadata.topic_id
+                run_id = response.metadata.run_id
+                if topic_id not in nugget_banks.banks:
+                    continue
+                nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+                if not nuggets:
+                    continue
+                scores_list = []
+                for nugget in nuggets:
+                    cache_key = f"{run_id}_{topic_id}_{nugget.question_id}"
+                    scores_list.append(retrieval_cache.get(cache_key, 0))
+                retrieval_quality[(run_id, topic_id)] = sum(scores_list) / (len(scores_list) * 2.0)
+
+        print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
+
+        # ── Stage 1: Claims extraction ────────────────
+        claims_cache_path = f"{filebase}.claims_newcache.json"
         claims_cache = load_cache(claims_cache_path)
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
 
@@ -393,8 +489,8 @@ class MinnaLeaderboardJudge:
 
         save_cache(claims_cache, claims_cache_path)
 
-        # ── Stage 2a: Attribution score (claim × all docs, from cache) ───
-        nli_scores_cache_path = f"{run3_base}.nli_scores_newcache.json"
+        # ── Stage 2a: Attribution score (claim × all docs) ───
+        nli_scores_cache_path = f"{filebase}.nli_scores_newcache.json"
         nli_scores_cache = load_cache(nli_scores_cache_path)
         score_dict: Dict[Tuple[Tuple[str, str], str], int] = {}
 
@@ -512,8 +608,11 @@ class MinnaLeaderboardJudge:
 
         save_cache(citation_cache, citation_cache_path)
 
-        # ── Stage 3: Pairwise preference evaluation + score aggregation ──
-        original_scores: Dict[Tuple[str, str], float] = {}
+        
+        # Step 1: Compute all 5 preliminary score variants per (run, topic)
+        preliminary: Dict[str, Dict[Tuple[str, str], float]] = {
+            "v1": {}, "v2": {}, "v3": {}, "v4": {}, "v5": {},
+        }
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
             topic_id = response.metadata.topic_id
@@ -522,18 +621,33 @@ class MinnaLeaderboardJudge:
             comp = qrels_dict.get((topic_id, text_id), 0) / 3.0
             cite_sup, cite_total = citation_info.get(key, (0, 0))
             ca = cite_sup / cite_total if cite_total > 0 else 0.0
-            original_scores[key] = 0.5 * (comp + ca)
+            rq = retrieval_quality.get(key, 0.0)
 
-        anchors = pick_anchors(original_scores)
+            # Need claims/attribution for v2-v5
+            claim_list = claims.get(key, [])
+            attr = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list) if claim_list else 0
 
+            preliminary["v1"][key] = 0.40 * comp + 0.35 * rq + 0.25 * ca
+            preliminary["v2"][key] = 0.30 * comp + 0.25 * rq + 0.25 * attr + 0.20 * ca
+            preliminary["v3"][key] = 0.55 * comp + 0.20 * rq + 0.15 * attr + 0.10 * ca
+            preliminary["v4"][key] = 0.25 * comp + 0.50 * rq + 0.15 * attr + 0.10 * ca
+            preliminary["v5"][key] = 0.25 * comp + 0.25 * rq + 0.25 * attr + 0.25 * ca
+
+        # Step 2: Pick anchors and run pairwise for each variant.
         pairwise = PairwisePreferenceJudge()
-        pairwise_scores = pairwise.run_pairwise(
-            rag_responses=responses,
-            rag_topics=rag_topics,
-            llm_config=llm_config,
-            anchors=anchors,
-            filebase=run3_base,
-        )
+        all_pairwise: Dict[str, Dict[Tuple[str, str], float]] = {}
+
+        for variant_name, variant_scores in preliminary.items():
+            anchors = pick_anchors(variant_scores)
+            pw_scores = pairwise.run_pairwise(
+                rag_responses=responses,
+                rag_topics=rag_topics,
+                llm_config=llm_config,
+                anchors=anchors,
+                filebase=filebase,
+            )
+            all_pairwise[variant_name] = pw_scores
+            print(f"Pairwise {variant_name}: {len(pw_scores)} scored, {len(anchors)} anchors")
 
         # Build final leaderboard
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
@@ -550,24 +664,44 @@ class MinnaLeaderboardJudge:
                 attribution = 0
 
             completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
-            # Use neutral midpoint (1.0) for topics skipped by pairwise
-            # (zero-best topics have no meaningful anchor to compare against)
-            pairwise_val = pairwise_scores.get(key, 1.0)
+            pw_v1 = all_pairwise["v1"].get(key, 1.0)
+            pw_v2 = all_pairwise["v2"].get(key, 1.0)
+            pw_v3 = all_pairwise["v3"].get(key, 1.0)
+            pw_v4 = all_pairwise["v4"].get(key, 1.0)
+            pw_v5 = all_pairwise["v5"].get(key, 1.0)
 
             cite_sup, cite_total = citation_info.get(key, (0, 0))
             cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
 
-            final = 0.5 * (completeness + cite_acc)
+            ret_qual = retrieval_quality.get(key, 0.0)
+
+           
+            final_v1 = 0.40 * completeness + 0.35 * ret_qual + 0.25 * cite_acc
+            final_v2 = 0.30 * completeness + 0.25 * ret_qual + 0.25 * attribution + 0.20 * cite_acc
+            final_v3 = 0.55 * completeness + 0.20 * ret_qual + 0.15 * attribution + 0.10 * cite_acc
+            final_v4 = 0.25 * completeness + 0.50 * ret_qual + 0.15 * attribution + 0.10 * cite_acc
+            final_v5 = 0.25 * completeness + 0.25 * ret_qual + 0.25 * attribution + 0.25 * cite_acc
 
             builder.add(
                 run_id=response.metadata.run_id,
                 topic_id=topic_id,
                 values={
+                    # ── Component measures ──
                     "COMPLETENESS_SCORE": completeness,
                     "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
-                    "FINAL_SCORE": final,
-                    "PAIRWISE_SCORE": pairwise_val,
+                    "RETRIEVAL_QUALITY": ret_qual,
+                    "PAIRWISE_SCORE": pw_v1,
+                    "PAIRWISE_SCORE_V2": pw_v2,
+                    "PAIRWISE_SCORE_V3": pw_v3,
+                    "PAIRWISE_SCORE_V4": pw_v4,
+                    "PAIRWISE_SCORE_V5": pw_v5,
+                    # ── FINAL_SCORE variants ──
+                    "FINAL_SCORE": final_v1,
+                    "FINAL_SCORE_V2": final_v2,
+                    "FINAL_SCORE_V3": final_v3,
+                    "FINAL_SCORE_V4": final_v4,
+                    "FINAL_SCORE_V5": final_v5,
                 },
             )
 
