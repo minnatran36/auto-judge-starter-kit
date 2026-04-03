@@ -28,7 +28,8 @@ jobs:
           pip3 install --no-deps ir_datasets
           pip3 uninstall -y tira
           pip3 install 'git+https://github.com/tira-io/tira.git@rag4reports#subdirectory=python-client'
-      - name: Test trec25/judges/naive
+
+      - name: Test judges/naive
         run: |
           tira-cli code-submission \
             --dry-run \
@@ -38,3 +39,12 @@ jobs:
             --dataset kiddie-20260403-training \
             --command 'auto-judge run --workflow /auto-judge/judges/naive/workflow.yml --rag-responses $inputDataset/runs/*/ --rag-topics $inputDataset/topics/*.jsonl --out-dir $outputDir'
 
+      - name: Test judges/pyterrier_retrieval
+        run: |
+          tira-cli code-submission \
+            --dry-run \
+            --path . \
+            --file judges/pyterrier_retrieval/Dockerfile \
+            --task trec-auto-judge \
+            --dataset kiddie-20260403-training \
+            --command 'auto-judge run --workflow /auto-judge/judges/pyterrier_retrieval/workflow.yml --rag-responses $inputDataset/runs/*/ --rag-topics $inputDataset/topics/*.jsonl --out-dir $outputDir'
