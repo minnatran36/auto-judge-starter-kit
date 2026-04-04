@@ -8,10 +8,13 @@
 #   assessed_topics: (optional) list of topic IDs for --topics assessed
 
 datasets:
-  - name: ragtime
+  - name: kiddie
     responses: data/kiddie/runs/repgen/
-    topics: data/kiddie/topics/ragtime25_main_all.jsonl
+    topics: data/kiddie/topics/kiddie-topics.jsonl
     prio1_runs:
-    
+      - run1
+      - run2
     assessed_topics:
-    
+      - leaf
+      - cloud
+      - bee
