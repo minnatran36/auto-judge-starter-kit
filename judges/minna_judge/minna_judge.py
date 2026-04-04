@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# RUN7
+# RUN7A
+
+import warnings
+import logging
+warnings.filterwarnings("ignore", message="Be aware, overflowing tokens")
+warnings.filterwarnings("ignore", message="You are using the default legacy behaviour")
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 import asyncio
@@ -48,9 +54,13 @@ class _VectaraHHEM:
         scores = []
         for i in range(0, len(sentence_pairs), batch_size):
             batch = sentence_pairs[i:i + batch_size]
+            # FIX: max_length=512 prevents tokenizer from processing full doc texts
+            # before truncating — this was causing millions of "overflowing tokens"
+            # warnings and wasting CPU time on text that gets thrown away
             inputs = self._tokenizer(
                 [p[0] for p in batch], [p[1] for p in batch],
                 return_tensors="pt", padding=True, truncation=True,
+                max_length=512,
             ).to(self._device)
             with torch.no_grad():
                 logits = self._model(**inputs).logits
@@ -522,8 +532,10 @@ class MinnaLeaderboardJudge:
 
         CHUNK_SIZE = 500
         if pairs:
+            print(f"Attribution NLI: {len(pairs)} pairs to score on {nli_model._device}", flush=True)
             for i in range(0, len(pairs), CHUNK_SIZE):
                 chunk_scores = nli_model.predict(pairs[i:i + CHUNK_SIZE])
+                print(f"  Attribution NLI: {min(i + CHUNK_SIZE, len(pairs))}/{len(pairs)} done", flush=True)
                 for j, score in enumerate(chunk_scores):
                     idx = i + j
                     key, doc_id, claim = pair_index[idx]
@@ -533,6 +545,9 @@ class MinnaLeaderboardJudge:
                     nli_scores_cache[key_str] = raw_nli
                     if raw_nli == 1:
                         score_dict[(key, claim)] = 1
+                # save cache every 10 chunks to avoid losing progress
+                if (i // CHUNK_SIZE) % 10 == 9:
+                    save_cache(nli_scores_cache, nli_scores_cache_path)
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
@@ -584,9 +599,11 @@ class MinnaLeaderboardJudge:
 
         # Run NLI on citation pairs — a fragment is supported if ANY cited doc entails it
         if cite_pairs:
+            print(f"Citation NLI: {len(cite_pairs)} pairs to score on {nli_model._device}", flush=True)
             already_supported = set()
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
                 chunk_scores = nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
+                print(f"  Citation NLI: {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
                 for j, score in enumerate(chunk_scores):
                     idx = i + j
                     key, frag_idx, cid = cite_pair_index[idx]
