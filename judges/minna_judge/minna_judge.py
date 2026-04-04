@@ -35,7 +35,7 @@ from autojudge_base.nugget_data import (
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
 from transformers import AutoModelForSequenceClassification, T5Tokenizer
 import torch
-from .pairwise_judge import PairwisePreferenceJudge, pick_anchors
+# pairwise_judge kept in repo but not used in this FINAL_SCORE formula
 
 
 class _VectaraHHEM:
@@ -72,22 +72,12 @@ nli_model = _VectaraHHEM()
 
 
 MINIMAL_SPEC = LeaderboardSpec(measures=(
-    MeasureSpec("COMPLETENESS_SCORE"),    
-    MeasureSpec("ATTRIBUTION_SCORE"),    
-    MeasureSpec("CITATION_ACCURACY"),     
-    MeasureSpec("RETRIEVAL_QUALITY"),     
-    # ── FINAL_SCORE variants  ──
-    MeasureSpec("FINAL_SCORE"),           # v1: (comp+ret+cite)
-    MeasureSpec("FINAL_SCORE_V2"),        # v2: (comp+attr+ret+cite)
-    MeasureSpec("FINAL_SCORE_V3"),        # v3: (comp dominates)
-    MeasureSpec("FINAL_SCORE_V4"),        # v4: (ret dominates)
-    MeasureSpec("FINAL_SCORE_V5"),        # v5: equal weight all 4 components
-    # ── Pairwise scores(each uses its own anchors) ──
-    MeasureSpec("PAIRWISE_SCORE"),        # pairwise for v1
-    MeasureSpec("PAIRWISE_SCORE_V2"),     # pairwise for v2
-    MeasureSpec("PAIRWISE_SCORE_V3"),     # pairwise for v3
-    MeasureSpec("PAIRWISE_SCORE_V4"),     # pairwise for v4
-    MeasureSpec("PAIRWISE_SCORE_V5"),     # pairwise for v5
+    MeasureSpec("COMPLETENESS_SCORE"),
+    MeasureSpec("ATTRIBUTION_SCORE"),
+    MeasureSpec("CITATION_ACCURACY"),
+    MeasureSpec("RETRIEVAL_QUALITY"),
+    # FINAL_SCORE = 0.5 * attribution + 0.5 * retrieval_quality
+    MeasureSpec("FINAL_SCORE"),
 ))
 
 
@@ -629,47 +619,9 @@ class MinnaLeaderboardJudge:
         save_cache(citation_cache, citation_cache_path)
 
         
-        # Step 1: Compute all 5 preliminary score variants per (run, topic)
-        preliminary: Dict[str, Dict[Tuple[str, str], float]] = {
-            "v1": {}, "v2": {}, "v3": {}, "v4": {}, "v5": {},
-        }
-        for response in responses:
-            key = (response.metadata.run_id, response.metadata.topic_id)
-            topic_id = response.metadata.topic_id
-            text = response.get_report_text()
-            text_id = doc_id_md5(text)
-            comp = qrels_dict.get((topic_id, text_id), 0) / 3.0
-            cite_sup, cite_total = citation_info.get(key, (0, 0))
-            ca = cite_sup / cite_total if cite_total > 0 else 0.0
-            rq = retrieval_quality.get(key, 0.0)
-
-            # Need claims/attribution for v2-v5
-            claim_list = claims.get(key, [])
-            attr = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list) if claim_list else 0
-
-            preliminary["v1"][key] = 0.40 * comp + 0.35 * rq + 0.25 * ca
-            preliminary["v2"][key] = 0.30 * comp + 0.25 * rq + 0.25 * attr + 0.20 * ca
-            preliminary["v3"][key] = 0.55 * comp + 0.20 * rq + 0.15 * attr + 0.10 * ca
-            preliminary["v4"][key] = 0.25 * comp + 0.50 * rq + 0.15 * attr + 0.10 * ca
-            preliminary["v5"][key] = 0.25 * comp + 0.25 * rq + 0.25 * attr + 0.25 * ca
-
-        # Step 2: Pick anchors and run pairwise for each variant.
-        pairwise = PairwisePreferenceJudge()
-        all_pairwise: Dict[str, Dict[Tuple[str, str], float]] = {}
-
-        for variant_name, variant_scores in preliminary.items():
-            anchors = pick_anchors(variant_scores)
-            pw_scores = pairwise.run_pairwise(
-                rag_responses=responses,
-                rag_topics=rag_topics,
-                llm_config=llm_config,
-                anchors=anchors,
-                filebase=filebase,
-            )
-            all_pairwise[variant_name] = pw_scores
-            print(f"Pairwise {variant_name}: {len(pw_scores)} scored, {len(anchors)} anchors")
-
         # Build final leaderboard
+        # FINAL_SCORE = 0.5 * attribution + 0.5 * retrieval_quality
+        # (best two components by avg kendall across all truth measures)
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -684,44 +636,23 @@ class MinnaLeaderboardJudge:
                 attribution = 0
 
             completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
-            pw_v1 = all_pairwise["v1"].get(key, 1.0)
-            pw_v2 = all_pairwise["v2"].get(key, 1.0)
-            pw_v3 = all_pairwise["v3"].get(key, 1.0)
-            pw_v4 = all_pairwise["v4"].get(key, 1.0)
-            pw_v5 = all_pairwise["v5"].get(key, 1.0)
 
             cite_sup, cite_total = citation_info.get(key, (0, 0))
             cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
 
             ret_qual = retrieval_quality.get(key, 0.0)
 
-           
-            final_v1 = 0.40 * completeness + 0.35 * ret_qual + 0.25 * cite_acc
-            final_v2 = 0.30 * completeness + 0.25 * ret_qual + 0.25 * attribution + 0.20 * cite_acc
-            final_v3 = 0.55 * completeness + 0.20 * ret_qual + 0.15 * attribution + 0.10 * cite_acc
-            final_v4 = 0.25 * completeness + 0.50 * ret_qual + 0.15 * attribution + 0.10 * cite_acc
-            final_v5 = 0.25 * completeness + 0.25 * ret_qual + 0.25 * attribution + 0.25 * cite_acc
+            final_score = 0.5 * attribution + 0.5 * ret_qual
 
             builder.add(
                 run_id=response.metadata.run_id,
                 topic_id=topic_id,
                 values={
-                    # ── Component measures ──
                     "COMPLETENESS_SCORE": completeness,
                     "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
-                    "PAIRWISE_SCORE": pw_v1,
-                    "PAIRWISE_SCORE_V2": pw_v2,
-                    "PAIRWISE_SCORE_V3": pw_v3,
-                    "PAIRWISE_SCORE_V4": pw_v4,
-                    "PAIRWISE_SCORE_V5": pw_v5,
-                    # ── FINAL_SCORE variants ──
-                    "FINAL_SCORE": final_v1,
-                    "FINAL_SCORE_V2": final_v2,
-                    "FINAL_SCORE_V3": final_v3,
-                    "FINAL_SCORE_V4": final_v4,
-                    "FINAL_SCORE_V5": final_v5,
+                    "FINAL_SCORE": final_score,
                 },
             )
 
@@ -729,7 +660,7 @@ class MinnaLeaderboardJudge:
             expected_topic_ids=expected_topic_ids,
             on_missing=on_missing_evals,
         )
-        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries (includes PAIRWISE_SCORE)")
+        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries (FINAL=0.5*attr+0.5*ret)")
 
         return leaderboard
 
