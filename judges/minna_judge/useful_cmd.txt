@@ -1,0 +1,63 @@
+🌍 huggingface-cli download trec-ragtime/ragtime1 --repo-type dataset \
+    --include "arb-docs.jsonl" --local-dir ~/ragtime1
+
+
+🌍 ls -lh ~/ragtime1/arb-docs.jsonl
+
+check if the download is still running:
+ps aux | grep -i hugging
+
+🌍 python3 << 'EOF'
+from autojudge_base import Report
+import inspect
+print("Report attrs:", [a for a in dir(Report) if not a.startswith('_')])
+print()
+# also check what get_report_text returns and whether there's a raw passthrough
+print("Methods:", [m for m in dir(Report) if callable(getattr(Report, m, None)) and not m.startswith('_')])
+EOF
+
+🌍 python3 << 'EOF'
+from autojudge_base import Report
+print("=== Fields ===")
+for name, info in Report.model_fields.items():
+    print(f"  {name}: {info.annotation}")
+
+# Load one actual rag4reports report and inspect
+import json
+path = "/home/nt1112/auto-judge-starter-kit/rag4Report/rag4reports-2026/data/generated-reports/adventure-continue"
+with open(path) as f:
+    line = f.readline()
+data = json.loads(line)
+print("\n=== Raw JSON keys ===")
+print(list(data.keys()))
+
+r = Report.model_validate(data)
+print("\n=== Instance attrs (non-method) ===")
+for f in Report.model_fields:
+    val = getattr(r, f, None)
+    if val is None:
+        print(f"  {f}: None")
+    elif isinstance(val, (list, dict)):
+        print(f"  {f}: {type(val).__name__} len={len(val)}")
+    else:
+        print(f"  {f}: {type(val).__name__}")
+
+print("\n=== get_report_text() first 200 chars ===")
+print(r.get_report_text()[:200])
+
+# Does it have a documents-like field?
+if hasattr(r, "documents"):
+    print(f"\nr.documents: {type(r.documents).__name__}, len={len(r.documents) if r.documents else 0}")
+if hasattr(r, "references"):
+    print(f"r.references: {type(r.references).__name__}, len={len(r.references) if r.references else 0}")
+    if r.references:
+        print(f"  first: {r.references[0]}")
+EOF
+
+🌍 python3 -c "
+from autojudge_base.document.document import Document
+print('Fields:', list(Document.model_fields.keys()) if hasattr(Document, 'model_fields') else 'not pydantic')
+import inspect
+try: print(inspect.signature(Document.__init__))
+except: pass
+"

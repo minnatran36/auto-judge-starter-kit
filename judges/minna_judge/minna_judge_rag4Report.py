@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# RUN7A
+# RUN8
 
 import warnings
 import logging
@@ -32,15 +32,65 @@ from autojudge_base.nugget_data import (
     NuggetBank,
     NuggetQuestion,
 )
+from autojudge_base.document.document import Document
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
 from transformers import AutoModelForSequenceClassification, T5Tokenizer
 import torch
-# pairwise_judge kept in repo but not used in this FINAL_SCORE formula
+
+
+# =============================================================================
+# Ragtime1 corpus loader (for rag4reports format)
+# =============================================================================
+# rag4reports system files don't ship doc text inline — only doc IDs in
+# `references` and `responses[*].citations`. The full doc text lives in the
+# trec-ragtime/ragtime1 HF dataset, split across 4 language files.
+# Loon-style files already have `documents` populated, so the backfill below
+# is a no-op for them.
+
+CORPUS_PATHS = [
+    os.path.expanduser(f"~/ragtime1/{lang}-docs.jsonl")
+    for lang in ("eng", "rus", "arb", "zho")
+]
+CORPUS_CACHE_PATH = os.path.expanduser("~/ragtime1/.rag4reports_corpus_cache.json")
+
+
+def load_ragtime_corpus(needed_ids: set) -> dict:
+    """Stream all 4 ragtime1 splits, return {doc_id: text} for needed IDs only.
+    Caches the filtered dict to disk so subsequent runs are instant."""
+    existing = {}
+    if os.path.exists(CORPUS_CACHE_PATH):
+        with open(CORPUS_CACHE_PATH) as f:
+            existing = json.load(f)
+        if needed_ids <= set(existing.keys()):
+            print(f"load_ragtime_corpus: {len(needed_ids)} docs already in cache")
+            return {k: existing[k] for k in needed_ids}
+
+    remaining = set(needed_ids) - set(existing.keys())
+    print(f"load_ragtime_corpus: scanning corpus for {len(remaining)} new doc IDs...")
+    docs = dict(existing)
+    for path in CORPUS_PATHS:
+        if not remaining:
+            break
+        if not os.path.exists(path):
+            print(f"  WARN: {path} not found, skipping")
+            continue
+        with open(path) as f:
+            for line in f:
+                d = json.loads(line)
+                if d["id"] in remaining:
+                    docs[d["id"]] = d["text"]
+                    remaining.discard(d["id"])
+                    if not remaining:
+                        break
+        print(f"  after {os.path.basename(path)}: {len(needed_ids) - len(remaining)}/{len(needed_ids)} found")
+
+    with open(CORPUS_CACHE_PATH, "w") as f:
+        json.dump(docs, f)
+    print(f"  cached {len(docs)} docs total ({len(remaining)} still missing)")
+    return {k: docs[k] for k in needed_ids if k in docs}
 
 
 class _VectaraHHEM:
-    """Wrapper around HHEMv2 with .predict() matching CrossEncoder interface."""
-
     def __init__(self):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
@@ -70,13 +120,9 @@ class _VectaraHHEM:
 
 nli_model = _VectaraHHEM()
 
-
 MINIMAL_SPEC = LeaderboardSpec(measures=(
-    MeasureSpec("COMPLETENESS_SCORE"),
     MeasureSpec("ATTRIBUTION_SCORE"),
-    MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
-    # FINAL_SCORE = 0.5 * (max(citation, attribution) + retrieval_quality)
     MeasureSpec("FINAL_SCORE"),
 ))
 
@@ -337,13 +383,35 @@ class MinnaLeaderboardJudge:
         **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
-        # Reuse caches from run7 regardless of current filebase
-        cache_filebase = "output-kiddie/minna_judge_run7"
+        filebase = kwargs.get("filebase", "output-rag4report/minna_judge")
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
         responses = list(rag_responses)
+
+        # ── Backfill response.documents for rag4reports format ──────────────
+        # rag4reports system files only contain doc IDs (no inline text), so
+        # autojudge-base loads them with `documents = None`. Without docs, both
+        # the attribution and retrieval-quality branches below skip everything
+        # and every score is 0. Loon-style files already have documents
+        # populated, so this loop is a no-op for them.
+        needs_backfill = [r for r in responses if not r.documents and r.references]
+        if needs_backfill:
+            needed_ids = set()
+            for r in needs_backfill:
+                needed_ids.update(r.references)
+            id_to_text = load_ragtime_corpus(needed_ids)
+            backfilled = 0
+            for r in needs_backfill:
+                r.documents = {
+                    doc_id: Document(id=doc_id, text=id_to_text[doc_id])
+                    for doc_id in r.references
+                    if doc_id in id_to_text
+                }
+                if r.documents:
+                    backfilled += 1
+            print(f"Backfilled documents on {backfilled}/{len(needs_backfill)} responses")
 
         qrels_dict: Dict[Tuple[str, str], int] = {}
         if qrels:
@@ -351,7 +419,7 @@ class MinnaLeaderboardJudge:
                 qrels_dict[(row.topic_id, row.doc_id)] = row.grade
 
         
-        retrieval_cache_path = f"{cache_filebase}.retrieval_quality_cache.json"
+        retrieval_cache_path = f"{filebase}.retrieval_quality_cache.json"
         retrieval_cache = load_cache(retrieval_cache_path)
         # Each request checks one (system, topic, nugget) triple
         retrieval_requests: List[Tuple[str, str, str, MinimaLlmRequest]] = []
@@ -444,7 +512,7 @@ class MinnaLeaderboardJudge:
         print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
 
         # ── Stage 1: Claims extraction ────────────────
-        claims_cache_path = f"{cache_filebase}.claims_newcache.json"
+        claims_cache_path = f"{filebase}.claims_newcache.json"
         claims_cache = load_cache(claims_cache_path)
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
 
@@ -494,7 +562,7 @@ class MinnaLeaderboardJudge:
         save_cache(claims_cache, claims_cache_path)
 
         # ── Stage 2a: Attribution score (claim × all docs) ───
-        nli_scores_cache_path = f"{cache_filebase}.nli_scores_newcache.json"
+        nli_scores_cache_path = f"{filebase}.nli_scores_newcache.json"
         nli_scores_cache = load_cache(nli_scores_cache_path)
         score_dict: Dict[Tuple[Tuple[str, str], str], int] = {}
 
@@ -542,93 +610,11 @@ class MinnaLeaderboardJudge:
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
-        # ── Stage 2b: Citation accuracy (fragment × cited docs) ──────────
-        citation_cache_path = f"{cache_filebase}.citation_newcache.json"
-        citation_cache = load_cache(citation_cache_path)
-
-        cite_pairs: List[Tuple[str, str]] = []
-        cite_pair_index: List[Tuple[Tuple[str, str], int, str]] = []
-
-        citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
-
-        for response in responses:
-            if not response.responses:
-                continue
-            key = (response.metadata.run_id, response.metadata.topic_id)
-            docs = response.documents or {}
-
-            supported = 0
-            total_cited = 0
-
-            for frag_idx, fragment in enumerate(response.responses):
-                cited_ids = []
-                if fragment.citations:
-                    if isinstance(fragment.citations, dict):
-                        cited_ids = list(fragment.citations.keys())
-                    elif isinstance(fragment.citations, list):
-                        cited_ids = [str(c) for c in fragment.citations]
-
-                if not cited_ids:
-                    continue
-
-                total_cited += 1
-                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-
-                if cache_key in citation_cache:
-                    if citation_cache[cache_key] == 1:
-                        supported += 1
-                    continue
-
-                # Check ALL cited docs (not just first)
-                frag_text = fragment.text
-                for cid in cited_ids:
-                    if cid in docs:
-                        cite_pairs.append((docs[cid].text, frag_text))
-                        cite_pair_index.append((key, frag_idx, cid))
-
-            citation_info[key] = (supported, total_cited)
-
-        # Run NLI on citation pairs — a fragment is supported if ANY cited doc entails it
-        if cite_pairs:
-            print(f"Citation NLI: {len(cite_pairs)} pairs to score on {nli_model._device}", flush=True)
-            already_supported = set()
-            for i in range(0, len(cite_pairs), CHUNK_SIZE):
-                chunk_scores = nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
-                print(f"  Citation NLI: {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
-                for j, score in enumerate(chunk_scores):
-                    idx = i + j
-                    key, frag_idx, cid = cite_pair_index[idx]
-                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-
-                    if cache_key in already_supported:
-                        continue
-
-                    # HHEM: single float (0-1), threshold at 0.5
-                    is_supported = 1 if float(score) > 0.5 else 0
-                    if is_supported:
-                        already_supported.add(cache_key)
-                        citation_cache[cache_key] = 1
-                        prev_sup, prev_total = citation_info[key]
-                        citation_info[key] = (prev_sup + 1, prev_total)
-
-            # Mark unsupported fragments (checked all docs, none supported)
-            for key, frag_idx, cid in cite_pair_index:
-                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-                if cache_key not in citation_cache:
-                    citation_cache[cache_key] = 0
-
-        save_cache(citation_cache, citation_cache_path)
-
-        
         # Build final leaderboard
-        # FINAL_SCORE = 0.5 * (max(citation, attribution) + retrieval_quality)
-        # (best two components by avg kendall across all truth measures)
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
             topic_id = response.metadata.topic_id
-            text = response.get_report_text()
-            text_id = doc_id_md5(text)
 
             claim_list = claims.get(key, [])
             if claim_list:
@@ -636,24 +622,16 @@ class MinnaLeaderboardJudge:
             else:
                 attribution = 0
 
-            completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
-
-            cite_sup, cite_total = citation_info.get(key, (0, 0))
-            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
-
             ret_qual = retrieval_quality.get(key, 0.0)
-
-            final_score = 0.5 * (max(cite_acc, attribution) + ret_qual)
+            final = 0.5 * (attribution + ret_qual)
 
             builder.add(
                 run_id=response.metadata.run_id,
                 topic_id=topic_id,
                 values={
-                    "COMPLETENESS_SCORE": completeness,
                     "ATTRIBUTION_SCORE": attribution,
-                    "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
-                    "FINAL_SCORE": final_score,
+                    "FINAL_SCORE": final,
                 },
             )
 
@@ -661,7 +639,8 @@ class MinnaLeaderboardJudge:
             expected_topic_ids=expected_topic_ids,
             on_missing=on_missing_evals,
         )
-        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries (FINAL=0.5*(max(cite,attr)+ret))")
+        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
+              f" (FINAL=0.5*(attr+ret))")
 
         return leaderboard
 

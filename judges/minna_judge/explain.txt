@@ -146,3 +146,54 @@ LOW cite, LOW attr (20 topics) — Broad + complex + niche
 ❤️ Attribution asks: "are the claims in this response supported by the retrieved documents?" 
 -- system makes both response & retrieved documents, roundabout logic? 
 a better question = does the documents answer the subquestions?
+
+
+
+FINAL JUDGE
+Retrieval + Attribution
+Average best -- nugget coverage, relevant_citations
+why -- if average should be in-btw? 
+no this uses avg for ranking, so what's underlying here?
+
+
+kendal: 0.66
+pearson: 0.94
+-- what does this mean?
+
+
+better when score 0-2 instead of binary, how much shoule we push this -- (0, 5)?
+
+it seems that measures for citation support and nugget correct are inversed compared to each other, 
+measure high in 1 is low in the other, so when i combine 0.5(attribution + relevance) these two combined both the worse and the best in each aspect 
+-- then in the perfect case, how does the correct measurement does so that in result in perfect match with groud truth?
+-- this means maybe conditional
+
+Ryan, best: checklist (5)
+negation idea? checklist + negation?
+don't let LLM do the math
+
+sentence level - previous sentence provides context/lack context
+
+Prof: topic, 
+query-only: generate questions up tp 20 -- very strong/use better model
+query & 1 response: what relavant?
+query & 2 responses: this one is better responses, make nuggets that capture the betterment of this response over the other
+
+claim: restate the fact or answer the fact? why > what?
+amplify the better/the best -- choose the best using pair preference
+
+citation -- score & pick max
+give example what you want as output
+
+
+WHY???
+1. kendal: 0.66
+pearson: 0.94
+-- what does this mean?
+
+2. High attribution goes well with ground truth ranking, but not citation support
+but if a system worth its salt, both need to rank/correlate well with ground truth. why?
+
+3. 
+
+

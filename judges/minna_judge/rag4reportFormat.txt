@@ -1,0 +1,33 @@
+=== Fields ===
+  is_ragtime: <class 'bool'>
+  metadata: <class 'autojudge_base.report.ReportMetaData'>
+  evaldata: typing.Optional[typing.Dict[str, typing.Any]]
+  responses: typing.Union[typing.List[autojudge_base.report.NeuclirReportSentence], typing.List[autojudge_base.report.RagtimeReportSentence], typing.List[autojudge_base.report.Rag24ReportSentence], NoneType]
+  answer: typing.Union[typing.List[autojudge_base.report.NeuclirReportSentence], typing.List[autojudge_base.report.RagtimeReportSentence], typing.List[autojudge_base.report.Rag24ReportSentence], NoneType]
+  path: typing.Optional[pathlib.Path]
+  references: typing.Optional[typing.List[str]]
+  documents: typing.Optional[typing.Dict[str, autojudge_base.document.document.Document]]
+
+=== Raw JSON keys ===
+['metadata', 'responses', 'references']
+
+=== Instance attrs (non-method) ===
+  is_ragtime: bool
+  metadata: ReportMetaData
+  evaldata: None
+  responses: list len=7
+  answer: list len=7
+  path: None
+  references: list len=3
+  documents: None
+
+=== get_report_text() first 200 chars ===
+This report addresses: Geoffrey Hinton's AI Concerns After the American actors’ union, SAG-AFTRA (Screen Actors Guild – American Federation of Television and Radio Artists) and the Writers Guild of Am
+
+🛑 r.documents: NoneType, len=0
+r.references: list, len=3
+  first: f1072b3c-6e96-41d5-b5d5-1a9867008f46_110175420
+
+🛑 Document
+Fields: ['id', 'text', 'title', 'url', 'metadata', 'created', 'cc_file', 'time', 'lang']
+(self, /, **data: 'Any') -> 'None
