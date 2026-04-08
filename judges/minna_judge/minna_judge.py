@@ -34,6 +34,7 @@ from autojudge_base.nugget_data import (
 )
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
 from transformers import AutoModelForSequenceClassification, T5Tokenizer
+from sentence_transformers import CrossEncoder
 import torch
 # pairwise_judge kept in repo but not used in this FINAL_SCORE formula
 
@@ -70,14 +71,23 @@ class _VectaraHHEM:
 
 nli_model = _VectaraHHEM()
 
+# deberta NLI for citation accuracy (run4 approach: strict 3-class entailment)
+citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
+print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
+
+# content_signal = 0.5*attribution + 0.5*ret_qual
+# FINAL_SCORE    = 0.7*content_signal + 0.3*cite_acc   (content-leaning)
+# FINAL_SCORE_V2 = 0.6*content_signal + 0.4*cite_acc   (balanced)
+# FINAL_SCORE_V3 = 0.5*content_signal + 0.5*cite_acc   (citation-equal)
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("COMPLETENESS_SCORE"),
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
-    # FINAL_SCORE = 0.5 * (max(citation, attribution) + retrieval_quality)
     MeasureSpec("FINAL_SCORE"),
+    MeasureSpec("FINAL_SCORE_V2"),
+    MeasureSpec("FINAL_SCORE_V3"),
 ))
 
 
@@ -542,12 +552,14 @@ class MinnaLeaderboardJudge:
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
-        # ── Stage 2b: Citation accuracy (fragment × cited docs) ──────────
-        citation_cache_path = f"{cache_filebase}.citation_newcache.json"
+        # ── Stage 2b: Citation accuracy (fragment × first cited doc) ────
+        # Uses deberta-v3-base NLI with strict 3-class entailment (run4 approach).
+        # Separate cache from HHEM citation cache so they don't collide.
+        citation_cache_path = f"{cache_filebase}.citation_deberta_cache.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
-        cite_pair_index: List[Tuple[Tuple[str, str], int, str]] = []
+        cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
 
         citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
 
@@ -579,50 +591,43 @@ class MinnaLeaderboardJudge:
                         supported += 1
                     continue
 
-                # Check ALL cited docs (not just first)
+                # run4 approach: check first matching cited doc only (less noise)
                 frag_text = fragment.text
                 for cid in cited_ids:
                     if cid in docs:
                         cite_pairs.append((docs[cid].text, frag_text))
-                        cite_pair_index.append((key, frag_idx, cid))
+                        cite_pair_index.append((key, frag_idx))
+                        break
 
             citation_info[key] = (supported, total_cited)
 
-        # Run NLI on citation pairs — a fragment is supported if ANY cited doc entails it
+        # Run deberta NLI on citation pairs
         if cite_pairs:
-            print(f"Citation NLI: {len(cite_pairs)} pairs to score on {nli_model._device}", flush=True)
-            already_supported = set()
+            print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
-                chunk_scores = nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
-                print(f"  Citation NLI: {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
+                chunk_scores = citation_nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
+                print(f"  Citation NLI (deberta): {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
                 for j, score in enumerate(chunk_scores):
                     idx = i + j
-                    key, frag_idx, cid = cite_pair_index[idx]
+                    key, frag_idx = cite_pair_index[idx]
                     cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-
-                    if cache_key in already_supported:
-                        continue
-
-                    # HHEM: single float (0-1), threshold at 0.5
-                    is_supported = 1 if float(score) > 0.5 else 0
+                    # deberta outputs [contradiction, entailment, neutral]
+                    # strict: entailment must be the dominant class
+                    is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
+                    citation_cache[cache_key] = is_supported
                     if is_supported:
-                        already_supported.add(cache_key)
-                        citation_cache[cache_key] = 1
                         prev_sup, prev_total = citation_info[key]
                         citation_info[key] = (prev_sup + 1, prev_total)
-
-            # Mark unsupported fragments (checked all docs, none supported)
-            for key, frag_idx, cid in cite_pair_index:
-                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-                if cache_key not in citation_cache:
-                    citation_cache[cache_key] = 0
 
         save_cache(citation_cache, citation_cache_path)
 
         
-        # Build final leaderboard
-        # FINAL_SCORE = 0.5 * (max(citation, attribution) + retrieval_quality)
-        # (best two components by avg kendall across all truth measures)
+        # Build final leaderboard.
+        # ATTRIBUTION and RETRIEVAL_QUALITY both correlate with content-quality
+        # truth measures (~0.6 kendall each on correct_nuggets/nugget_coverage),
+        # so we collapse them into one content_signal. CITATION_ACCURACY is
+        # orthogonal — it's the only signal good at the citation truth cluster.
+        # The three FINAL variants vary how much weight citation gets.
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -643,7 +648,10 @@ class MinnaLeaderboardJudge:
 
             ret_qual = retrieval_quality.get(key, 0.0)
 
-            final_score = 0.5 * (max(cite_acc, attribution) + ret_qual)
+            content_signal = 0.5 * attribution + 0.5 * ret_qual
+            final_v1 = 0.7 * content_signal + 0.3 * cite_acc
+            final_v2 = 0.6 * content_signal + 0.4 * cite_acc
+            final_v3 = 0.5 * content_signal + 0.5 * cite_acc
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -653,7 +661,9 @@ class MinnaLeaderboardJudge:
                     "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
-                    "FINAL_SCORE": final_score,
+                    "FINAL_SCORE": final_v1,
+                    "FINAL_SCORE_V2": final_v2,
+                    "FINAL_SCORE_V3": final_v3,
                 },
             )
 
@@ -661,7 +671,8 @@ class MinnaLeaderboardJudge:
             expected_topic_ids=expected_topic_ids,
             on_missing=on_missing_evals,
         )
-        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries (FINAL=0.5*(max(cite,attr)+ret))")
+        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
+              f" (FINAL=0.7c+0.3cite, V2=0.6c+0.4cite, V3=0.5c+0.5cite, c=0.5*attr+0.5*ret)")
 
         return leaderboard
 
