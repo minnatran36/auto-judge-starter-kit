@@ -76,10 +76,18 @@ citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
 
-# content_signal = 0.5*attribution + 0.5*ret_qual
-# FINAL_SCORE    = 0.7*content_signal + 0.3*cite_acc   (content-leaning)
-# FINAL_SCORE_V2 = 0.6*content_signal + 0.4*cite_acc   (balanced)
-# FINAL_SCORE_V3 = 0.5*content_signal + 0.5*cite_acc   (citation-equal)
+# Run11 — three FINAL formulas, all using HHEM attribution + deberta citation:
+# FINAL_SCORE    (Proposal A): 0.5 * (max(cite_norm, attr) + ret)
+#                              where cite_norm = min(1, cite * scale) and
+#                              scale = global_attr_mean / global_cite_mean.
+#                              Fixes run9's distributional bias: makes max() pick
+#                              cite vs attr fairly instead of cite always losing.
+# FINAL_SCORE_V2 (Proposal B): max(content_final, citation_final)
+#                              where content_final  = 0.5*attr + 0.5*ret
+#                                    citation_final = 0.7*cite + 0.3*ret
+#                              Picks dominant cluster per response.
+# FINAL_SCORE_V3 (Proposal C): 0.5*(max(cite,attr)+ret) + 0.10*cite_acc
+#                              run9's exact formula plus a small citation kicker.
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("COMPLETENESS_SCORE"),
     MeasureSpec("ATTRIBUTION_SCORE"),
@@ -622,12 +630,42 @@ class MinnaLeaderboardJudge:
         save_cache(citation_cache, citation_cache_path)
 
         
-        # Build final leaderboard.
-        # ATTRIBUTION and RETRIEVAL_QUALITY both correlate with content-quality
-        # truth measures (~0.6 kendall each on correct_nuggets/nugget_coverage),
-        # so we collapse them into one content_signal. CITATION_ACCURACY is
-        # orthogonal — it's the only signal good at the citation truth cluster.
-        # The three FINAL variants vary how much weight citation gets.
+        # ── Pass 1: collect per-response (attribution, cite_acc, ret_qual) ──
+        # Needed before the leaderboard loop because Proposal A requires the
+        # global means of attribution and cite_acc to compute the rescale factor.
+        per_response: Dict[Tuple[str, str], Dict[str, float]] = {}
+        for response in responses:
+            key = (response.metadata.run_id, response.metadata.topic_id)
+
+            claim_list = claims.get(key, [])
+            if claim_list:
+                attribution = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list)
+            else:
+                attribution = 0.0
+
+            cite_sup, cite_total = citation_info.get(key, (0, 0))
+            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
+
+            ret_qual = retrieval_quality.get(key, 0.0)
+
+            per_response[key] = {
+                "attribution": attribution,
+                "cite_acc": cite_acc,
+                "ret_qual": ret_qual,
+            }
+
+        # Compute global means for Proposal A's mean-normalized max.
+        # cite is harsh (avg ~0.05-0.15) while attr is generous (avg ~0.7-0.9),
+        # so without rescaling the max() in run9's formula always picks attr.
+        all_attr_vals = [v["attribution"] for v in per_response.values()]
+        all_cite_vals = [v["cite_acc"] for v in per_response.values()]
+        attr_mean = sum(all_attr_vals) / max(len(all_attr_vals), 1)
+        cite_mean = sum(all_cite_vals) / max(len(all_cite_vals), 1)
+        cite_scale = attr_mean / max(cite_mean, 1e-6)
+        print(f"Mean normalization: attr_mean={attr_mean:.4f}, "
+              f"cite_mean={cite_mean:.4f}, cite_scale={cite_scale:.2f}")
+
+        # ── Pass 2: build leaderboard with all three FINAL variants ─────────
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -635,23 +673,25 @@ class MinnaLeaderboardJudge:
             text = response.get_report_text()
             text_id = doc_id_md5(text)
 
-            claim_list = claims.get(key, [])
-            if claim_list:
-                attribution = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list)
-            else:
-                attribution = 0
+            s = per_response[key]
+            attribution = s["attribution"]
+            cite_acc = s["cite_acc"]
+            ret_qual = s["ret_qual"]
 
             completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
 
-            cite_sup, cite_total = citation_info.get(key, (0, 0))
-            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
+            # Proposal A: mean-normalized max — fixes run9's bias toward attr
+            cite_norm = min(1.0, cite_acc * cite_scale)
+            final_a = 0.5 * (max(cite_norm, attribution) + ret_qual)
 
-            ret_qual = retrieval_quality.get(key, 0.0)
+            # Proposal B: dual parallel finals, picks dominant cluster
+            content_final = 0.5 * attribution + 0.5 * ret_qual
+            citation_final = 0.7 * cite_acc + 0.3 * ret_qual
+            final_b = max(content_final, citation_final)
 
-            content_signal = 0.5 * attribution + 0.5 * ret_qual
-            final_v1 = 0.7 * content_signal + 0.3 * cite_acc
-            final_v2 = 0.6 * content_signal + 0.4 * cite_acc
-            final_v3 = 0.5 * content_signal + 0.5 * cite_acc
+            # Proposal C: run9's formula + small additive citation bonus
+            final_c = 0.5 * (max(cite_acc, attribution) + ret_qual) + 0.10 * cite_acc
+            final_c = min(1.0, final_c)  # cap at 1 since the bonus can push above
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -661,9 +701,9 @@ class MinnaLeaderboardJudge:
                     "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
-                    "FINAL_SCORE": final_v1,
-                    "FINAL_SCORE_V2": final_v2,
-                    "FINAL_SCORE_V3": final_v3,
+                    "FINAL_SCORE": final_a,
+                    "FINAL_SCORE_V2": final_b,
+                    "FINAL_SCORE_V3": final_c,
                 },
             )
 
@@ -672,7 +712,7 @@ class MinnaLeaderboardJudge:
             on_missing=on_missing_evals,
         )
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
-              f" (FINAL=0.7c+0.3cite, V2=0.6c+0.4cite, V3=0.5c+0.5cite, c=0.5*attr+0.5*ret)")
+              f" (FINAL=mean-norm-max, V2=dual-max, V3=run9+0.1cite)")
 
         return leaderboard
 
