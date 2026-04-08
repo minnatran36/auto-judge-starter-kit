@@ -1,0 +1,54 @@
+# Workflow for minna_judge_extra — kitchen-sink judge with all best ideas.
+# Run with:
+#   auto-judge run --workflow judges/minna_judge/workflow_extra.yml \
+#       --rag-responses data/kiddie/runs/repgen/ \
+#       --rag-topics data/kiddie/topics/kiddie-topics.jsonl \
+#       --out-dir ./output-kiddie/
+
+nugget_class: "judges.minna_judge.minna_judge_extra:MinnaNuggetCreator"
+qrels_class:  "judges.minna_judge.minna_judge_extra:MinnaQrelsCreator"
+judge_class:  "judges.minna_judge.minna_judge_extra:MinnaLeaderboardJudge"
+
+# =============================================================================
+# Lifecycle Flags
+# =============================================================================
+create_nuggets: true
+create_qrels: true
+judge: true
+
+nugget_depends_on_responses: true
+judge_uses_nuggets: true
+judge_uses_qrels: true
+qrels_uses_nuggets: true
+
+force_recreate_nuggets: false
+force_recreate_qrels: false
+
+augment_report: false
+
+
+# =============================================================================
+# Default Settings
+# =============================================================================
+# NOTE: minna_judge_extra hardcodes cache_filebase = "output-kiddie/minna_judge_run7"
+# so all NLI / claims / retrieval / citation caches are reused from run7.
+# The filebase below only controls the OUTPUT eval/nuggets/qrels filenames.
+
+settings:
+  filebase: "minna_judge_run12_extra"
+
+
+# =============================================================================
+# Phase-Specific Settings
+# =============================================================================
+
+nugget_settings:
+  max_nuggets: 10
+
+qrels_settings:
+  grade_range: [0, 3]
+  length_threshold: 100
+
+judge_settings:
+  keyword_bonus: 0.2
+  on_missing_evals: "fix_aggregate"
