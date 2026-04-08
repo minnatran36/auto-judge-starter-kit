@@ -1,0 +1,37 @@
+python3 << 'EOF'
+> import json, glob, os
+
+REPORTS_DIR = os.path.expanduser("~/auto-judge-starter-kit/rag4Report/rag4reports-2026/data/generated-reports")
+needed = set()
+for path in glob.glob(os.path.join(REPORTS_DIR, "*")):
+    with open(path) as f:
+        for line in f:
+            d = json.loads(line)
+            for ref in d.get("references", []):
+                needed.add(ref)
+            for r in d.get("responses", []):
+                cits = r.get("citations", {})
+                if isinstance(cits, dict): needed.update(cits.keys())
+                elif isinstance(cits, list): needed.update(cits)
+print(f"Total unique cited: {len(needed)}")
+
+found_by_split = {}
+for split in ["eng", "rus", "arb", "zho"]:
+    path = os.path.expanduser(f"~/ragtime1/{split}-docs.jsonl")
+    if not os.path.exists(path):
+        print(f"{split}: NOT DOWNLOADED YET")
+        continue
+    found = set()
+    with open(path) as f:
+        for line in f:
+            d = json.loads(line)
+            if d["id"] in needed:
+                found.add(d["id"])
+    found_by_split[split] = found
+    print(f"{split}: {len(found)} ({100*len(found)/len(needed):.1f}%)")
+
+union = set().union(*found_by_split.values())
+print(f"\nUnion across all splits: {len(union)} / {len(needed)} ({100*len(union)/len(needed):.1f}%)")
+missing = needed - union
+print(f"Still missing: {len(missing)}")
+EOF

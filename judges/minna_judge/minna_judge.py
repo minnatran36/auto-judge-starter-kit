@@ -32,9 +32,62 @@ from autojudge_base.nugget_data import (
     NuggetBank,
     NuggetQuestion,
 )
+from autojudge_base.document.document import Document
 from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
 from transformers import AutoModelForSequenceClassification, T5Tokenizer
 import torch
+
+
+# =============================================================================
+# Ragtime1 corpus loader (for rag4reports format)
+# =============================================================================
+# rag4reports system files don't ship doc text inline — only doc IDs in
+# `references` and `responses[*].citations`. The full doc text lives in the
+# trec-ragtime/ragtime1 HF dataset, split across 4 language files.
+# Loon-style files already have `documents` populated, so the backfill below
+# is a no-op for them.
+
+CORPUS_PATHS = [
+    os.path.expanduser(f"~/ragtime1/{lang}-docs.jsonl")
+    for lang in ("eng", "rus", "arb", "zho")
+]
+CORPUS_CACHE_PATH = os.path.expanduser("~/ragtime1/.rag4reports_corpus_cache.json")
+
+
+def load_ragtime_corpus(needed_ids: set) -> dict:
+    """Stream all 4 ragtime1 splits, return {doc_id: text} for needed IDs only.
+    Caches the filtered dict to disk so subsequent runs are instant."""
+    existing = {}
+    if os.path.exists(CORPUS_CACHE_PATH):
+        with open(CORPUS_CACHE_PATH) as f:
+            existing = json.load(f)
+        if needed_ids <= set(existing.keys()):
+            print(f"load_ragtime_corpus: {len(needed_ids)} docs already in cache")
+            return {k: existing[k] for k in needed_ids}
+
+    remaining = set(needed_ids) - set(existing.keys())
+    print(f"load_ragtime_corpus: scanning corpus for {len(remaining)} new doc IDs...")
+    docs = dict(existing)
+    for path in CORPUS_PATHS:
+        if not remaining:
+            break
+        if not os.path.exists(path):
+            print(f"  WARN: {path} not found, skipping")
+            continue
+        with open(path) as f:
+            for line in f:
+                d = json.loads(line)
+                if d["id"] in remaining:
+                    docs[d["id"]] = d["text"]
+                    remaining.discard(d["id"])
+                    if not remaining:
+                        break
+        print(f"  after {os.path.basename(path)}: {len(needed_ids) - len(remaining)}/{len(needed_ids)} found")
+
+    with open(CORPUS_CACHE_PATH, "w") as f:
+        json.dump(docs, f)
+    print(f"  cached {len(docs)} docs total ({len(remaining)} still missing)")
+    return {k: docs[k] for k in needed_ids if k in docs}
 
 
 class _VectaraHHEM:
@@ -336,6 +389,29 @@ class MinnaLeaderboardJudge:
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
         responses = list(rag_responses)
+
+        # ── Backfill response.documents for rag4reports format ──────────────
+        # rag4reports system files only contain doc IDs (no inline text), so
+        # autojudge-base loads them with `documents = None`. Without docs, both
+        # the attribution and retrieval-quality branches below skip everything
+        # and every score is 0. Loon-style files already have documents
+        # populated, so this loop is a no-op for them.
+        needs_backfill = [r for r in responses if not r.documents and r.references]
+        if needs_backfill:
+            needed_ids = set()
+            for r in needs_backfill:
+                needed_ids.update(r.references)
+            id_to_text = load_ragtime_corpus(needed_ids)
+            backfilled = 0
+            for r in needs_backfill:
+                r.documents = {
+                    doc_id: Document(id=doc_id, text=id_to_text[doc_id])
+                    for doc_id in r.references
+                    if doc_id in id_to_text
+                }
+                if r.documents:
+                    backfilled += 1
+            print(f"Backfilled documents on {backfilled}/{len(needs_backfill)} responses")
 
         qrels_dict: Dict[Tuple[str, str], int] = {}
         if qrels:
