@@ -74,12 +74,16 @@ citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
 
-# FINAL_SCORE_V3: 0.5*(max(cite,attr)+ret) + 0.10*cite_acc
-#                 run9's formula plus a small citation kicker.
+# FINAL_SCORE_V3 (mission3):
+#   0.4*resp_nug + 0.3*max(cite, attr) + 0.2*ret + 0.10*cite
+#
+# resp_nug = response-level nugget grading (0-5 scale, continuous mean).
+# Shares the qrels-stage LLM cache so no duplicate calls.
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
+    MeasureSpec("RESPONSE_NUGGET_SCORE"),
     MeasureSpec("FINAL_SCORE_V3"),
 ))
 
@@ -212,6 +216,13 @@ class MinnaNuggetCreator:
 # =============================================================================
 
 class MinnaQrelsCreator:
+    # Shared cache between qrels stage and judge() response-nugget stage:
+    # both ask the LLM the same question (graded 0-5) so each (response, nugget)
+    # pair is only ever scored once.
+    CACHE_DIR = "output-kiddie"
+    CACHE_TAG = "mission3"
+    CACHE_PATH = f"{CACHE_DIR}/qrels_grades_cache_{CACHE_TAG}.json"
+
     def create_qrels(
         self,
         rag_responses: Iterable[Report],
@@ -222,16 +233,21 @@ class MinnaQrelsCreator:
         **kwargs: Any,
     ) -> Optional[Qrels]:
 
+        os.makedirs(self.CACHE_DIR, exist_ok=True)
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
 
+        cache = load_cache(self.CACHE_PATH)
+
         responses = list(rag_responses)
         grade_records: List[GradeRecord] = []
-        requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
+        requests_info: List[Tuple[str, str, str, MinimaLlmRequest]] = []
 
+        # Build LLM requests only for cache misses.
         for response in responses:
             topic_id = response.metadata.topic_id
+            run_id = response.metadata.run_id
             text = response.get_report_text()
 
             if topic_id not in nugget_banks.banks:
@@ -240,19 +256,23 @@ class MinnaQrelsCreator:
             nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
 
             for nugget in nuggets:
+                cache_key = f"{run_id}_{topic_id}_{nugget.question_id}"
+                if cache_key in cache:
+                    continue
                 requests_info.append((
-                    response.metadata.run_id,
-                    topic_id,
+                    run_id, topic_id, nugget.question_id,
                     MinimaLlmRequest(
-                        # ask LLM to grade 0/1/2 instead of binary 0/1
-                        request_id=f"{response.metadata.run_id}_{topic_id}_{nugget.question_id}",
+                        request_id=cache_key,
                         messages=[
                             {"role": "system", "content": (
                                 "How well does this response answer this question? "
-                                "Reply with a single number:\n"
-                                "  2 = fully answers the question\n"
-                                "  1 = partially answers the question\n"
-                                "  0 = does not answer the question"
+                                "Reply with a single number from 0 to 5:\n"
+                                "  5 = fully answers with specific evidence and details\n"
+                                "  4 = fully answers in general terms\n"
+                                "  3 = partially answers most of the question\n"
+                                "  2 = partially answers some of the question\n"
+                                "  1 = barely addresses the question\n"
+                                "  0 = does not address the question"
                             )},
                             {"role": "user", "content": f"Question: {nugget.question}\n\nResponse: {text}"},
                         ],
@@ -260,24 +280,33 @@ class MinnaQrelsCreator:
                     )
                 ))
 
-        results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
-        scores = {}
+        if requests_info:
+            print(f"MinnaQrelsCreator: Sending {len(requests_info)} LLM grading requests "
+                  f"({len(cache)} already cached)...")
+            results = asyncio.run(backend.run_batched([req for _, _, _, req in requests_info]))
+            for (run_id, topic_id, nug_id, _), result in zip(requests_info, results):
+                cache_key = f"{run_id}_{topic_id}_{nug_id}"
+                cache[cache_key] = self._parse_graded(result)
+            save_cache(cache, self.CACHE_PATH)
 
-        for (run_id, topic_id, _), result in zip(requests_info, results):
-            score = self._parse_graded(result)
-            scores.setdefault((run_id, topic_id), []).append(score)
-
+        # Aggregate per (run, topic): average all per-nugget grades and round
+        # to the integer qrels scale [0..max_grade] for the .qrels.txt file.
         max_grade = grade_range[1]
         for response in responses:
-            key = (response.metadata.run_id, response.metadata.topic_id)
-            text = response.get_report_text()
             topic_id = response.metadata.topic_id
-            if key not in scores:
+            run_id = response.metadata.run_id
+            text = response.get_report_text()
+            if topic_id not in nugget_banks.banks:
                 continue
-
-            tallies = scores[key]
-            # each nugget scored 0-2, 1/2 to normalize to 1
-            avg = sum(tallies) / (len(tallies) * 2.0)  
+            nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+            if not nuggets:
+                continue
+            tallies = [
+                cache.get(f"{run_id}_{topic_id}_{n.question_id}", 0)
+                for n in nuggets
+            ]
+            # each nugget scored 0-5; normalize to [0,1]
+            avg = sum(tallies) / (len(tallies) * 5.0)
             grade = round(max_grade * avg)
             grade_records.append(GradeRecord(topic_id, text, grade))
 
@@ -286,11 +315,11 @@ class MinnaQrelsCreator:
         return qrels
 
     def _parse_graded(self, result) -> int:
-        """Parse 0/1/2 graded response from LLM."""
+        """Parse 0-5 graded response from LLM."""
         try:
             text = result.text.strip()
             for char in text:
-                if char in ("0", "1", "2"):
+                if char in ("0", "1", "2", "3", "4", "5"):
                     return int(char)
             return 0
         except:
@@ -328,12 +357,11 @@ class MinnaLeaderboardJudge:
         **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
-        # mission2: new cache tag. All cache files end with _mission2.json so
-        # they're easy to find and won't collide with prior runs.
-        # Attribution NLI now stores continuous floats and max-pools per claim
-        # instead of binary 0/1.
+        # mission3: response-level nugget grading is now in the leaderboard
+        # via RESPONSE_NUGGET_SCORE. Shares the qrels-stage cache (same prompt)
+        # so each (response, nugget) pair is graded by the LLM exactly once.
         cache_dir = "output-kiddie"
-        cache_tag = "mission2"
+        cache_tag = "mission3"
         os.makedirs(cache_dir, exist_ok=True)
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
@@ -432,6 +460,34 @@ class MinnaLeaderboardJudge:
                 retrieval_quality[(run_id, topic_id)] = sum(scores_list) / (len(scores_list) * 2.0)
 
         print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
+
+        # ── Stage RN: Response-level nugget grading (shares qrels cache) ────
+        # Reads the per-(response, nugget) 0-5 grades produced by MinnaQrelsCreator,
+        # and aggregates them as a continuous mean in [0, 1] per (run, topic).
+        # If the qrels stage didn't run (judge-only mode), this falls through
+        # with empty scores; everything still works but RESPONSE_NUGGET_SCORE = 0.
+        qrels_grades_cache_path = MinnaQrelsCreator.CACHE_PATH
+        qrels_grades_cache = load_cache(qrels_grades_cache_path)
+        response_nugget_score: Dict[Tuple[str, str], float] = {}
+
+        if nugget_banks:
+            for response in responses:
+                topic_id = response.metadata.topic_id
+                run_id = response.metadata.run_id
+                if topic_id not in nugget_banks.banks:
+                    continue
+                nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+                if not nuggets:
+                    continue
+                tallies = [
+                    qrels_grades_cache.get(f"{run_id}_{topic_id}_{n.question_id}", 0)
+                    for n in nuggets
+                ]
+                # 0-5 per nugget → normalize to [0, 1]
+                response_nugget_score[(run_id, topic_id)] = sum(tallies) / (len(tallies) * 5.0)
+
+        print(f"ResponseNugget: Scored {len(response_nugget_score)} (run, topic) pairs "
+              f"from {len(qrels_grades_cache)} cached grades")
 
         # ── Stage 1: Claims extraction ────────────────
         claims_cache_path = f"{cache_dir}/claims_cache_{cache_tag}.json"
@@ -617,10 +673,20 @@ class MinnaLeaderboardJudge:
             cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
 
             ret_qual = retrieval_quality.get(key, 0.0)
+            resp_nug = response_nugget_score.get(key, 0.0)
 
-            # FINAL_SCORE_V3: run9's formula + small additive citation bonus
-            final_v3 = 0.5 * (max(cite_acc, attribution) + ret_qual) + 0.10 * cite_acc
-            final_v3 = min(1.0, final_v3)  # cap at 1 since the bonus can push above
+            # FINAL_SCORE_V3 (mission3):
+            #   0.4 * resp_nug         response-level nugget grading (new)
+            # + 0.3 * max(cite, attr)  best of citation accuracy or attribution
+            # + 0.2 * ret_qual         retrieval-quality (docs vs nugget)
+            # + 0.10 * cite_acc        citation precision kicker
+            final_v3 = (
+                0.4 * resp_nug
+                + 0.3 * max(cite_acc, attribution)
+                + 0.2 * ret_qual
+                + 0.10 * cite_acc
+            )
+            final_v3 = min(1.0, final_v3)
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -629,6 +695,7 @@ class MinnaLeaderboardJudge:
                     "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
+                    "RESPONSE_NUGGET_SCORE": resp_nug,
                     "FINAL_SCORE_V3": final_v3,
                 },
             )
@@ -638,7 +705,7 @@ class MinnaLeaderboardJudge:
             on_missing=on_missing_evals,
         )
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
-              f" (FINAL_SCORE_V3 = run9+0.1cite)")
+              f" (FINAL_SCORE_V3 = 0.4*resp_nug + 0.3*max(cite,attr) + 0.2*ret + 0.10*cite)")
 
         return leaderboard
 
