@@ -194,6 +194,17 @@ pearson: 0.94
 2. High attribution goes well with ground truth ranking, but not citation support
 but if a system worth its salt, both need to rank/correlate well with ground truth. why?
 
-3. 
+3. consider outliers?
+
+
+
+------------------------------------------------
+If two ground truth measures rank responses differently from each other, then no single eval measure can have kendall = 1 against both simultaneously. This is just an algebraic fact: a single ranking can match at most one target ranking exactly.
+
+The best a single judge can do against multiple truth measures is land somewhere on the Pareto frontier — the set of points where you can't improve correlation with one truth measure without sacrificing correlation with another.
+
+A judge that has kendall = 1 against every truth measure can only exist if all truth measures are themselves perfectly correlated with each other. In your data, they're not. So that judge cannot exist.
+
+
 
 

@@ -61,3 +61,12 @@ import inspect
 try: print(inspect.signature(Document.__init__))
 except: pass
 "
+--------------------
+OLD SYSTEM ragtime
+pgrep -af auto-judge 
+
+jobs 
+tail -20 output-kiddie/judge_run.log
+
+
+nohup auto-judge run --workflow judges/minna_judge/workflow_extra.yml     --rag-responses data/kiddie/runs/repgen/     --rag-topics data/kiddie/topics/kiddie-topics.jsonl     --out-dir ./output-extra/

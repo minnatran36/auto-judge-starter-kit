@@ -76,25 +76,12 @@ citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
 
-# Run11 — three FINAL formulas, all using HHEM attribution + deberta citation:
-# FINAL_SCORE    (Proposal A): 0.5 * (max(cite_norm, attr) + ret)
-#                              where cite_norm = min(1, cite * scale) and
-#                              scale = global_attr_mean / global_cite_mean.
-#                              Fixes run9's distributional bias: makes max() pick
-#                              cite vs attr fairly instead of cite always losing.
-# FINAL_SCORE_V2 (Proposal B): max(content_final, citation_final)
-#                              where content_final  = 0.5*attr + 0.5*ret
-#                                    citation_final = 0.7*cite + 0.3*ret
-#                              Picks dominant cluster per response.
-# FINAL_SCORE_V3 (Proposal C): 0.5*(max(cite,attr)+ret) + 0.10*cite_acc
-#                              run9's exact formula plus a small citation kicker.
+# FINAL_SCORE_V3: 0.5*(max(cite,attr)+ret) + 0.10*cite_acc
+#                 run9's formula plus a small citation kicker.
 MINIMAL_SPEC = LeaderboardSpec(measures=(
-    MeasureSpec("COMPLETENESS_SCORE"),
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
-    MeasureSpec("FINAL_SCORE"),
-    MeasureSpec("FINAL_SCORE_V2"),
     MeasureSpec("FINAL_SCORE_V3"),
 ))
 
@@ -355,21 +342,19 @@ class MinnaLeaderboardJudge:
         **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
-        # Reuse caches from run7 regardless of current filebase
-        cache_filebase = "output-kiddie/minna_judge_run7"
+        # mission2: new cache tag. All cache files end with _mission2.json so
+        # they're easy to find and won't collide with prior runs.
+        # Attribution NLI now stores continuous floats and max-pools per claim
+        # instead of binary 0/1.
+        cache_dir = "output-kiddie"
+        cache_tag = "mission2"
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
         responses = list(rag_responses)
 
-        qrels_dict: Dict[Tuple[str, str], int] = {}
-        if qrels:
-            for row in qrels.rows:
-                qrels_dict[(row.topic_id, row.doc_id)] = row.grade
-
-        
-        retrieval_cache_path = f"{cache_filebase}.retrieval_quality_cache.json"
+        retrieval_cache_path = f"{cache_dir}/retrieval_quality_cache_{cache_tag}.json"
         retrieval_cache = load_cache(retrieval_cache_path)
         # Each request checks one (system, topic, nugget) triple
         retrieval_requests: List[Tuple[str, str, str, MinimaLlmRequest]] = []
@@ -462,7 +447,7 @@ class MinnaLeaderboardJudge:
         print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
 
         # ── Stage 1: Claims extraction ────────────────
-        claims_cache_path = f"{cache_filebase}.claims_newcache.json"
+        claims_cache_path = f"{cache_dir}/claims_cache_{cache_tag}.json"
         claims_cache = load_cache(claims_cache_path)
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
 
@@ -511,10 +496,13 @@ class MinnaLeaderboardJudge:
 
         save_cache(claims_cache, claims_cache_path)
 
-        # ── Stage 2a: Attribution score (claim × all docs) ───
-        nli_scores_cache_path = f"{cache_filebase}.nli_scores_newcache.json"
+        # ── Stage 2a: Attribution score (claim × all docs, continuous max-pool) ──
+        # Each (claim, doc) pair stores the raw HHEM float in [0, 1]; per-claim
+        # score = max over docs (preserves "any doc entails" semantics but keeps
+        # the strength signal that the old 0.5 threshold threw away).
+        nli_scores_cache_path = f"{cache_dir}/nli_scores_continuous_{cache_tag}.json"
         nli_scores_cache = load_cache(nli_scores_cache_path)
-        score_dict: Dict[Tuple[Tuple[str, str], str], int] = {}
+        score_dict: Dict[Tuple[Tuple[str, str], str], float] = {}
 
         pairs: List[Tuple[str, str]] = []
         pair_index: List[Tuple[Tuple[str, str], str, str]] = []
@@ -524,20 +512,17 @@ class MinnaLeaderboardJudge:
                 continue
             key = (response.metadata.run_id, response.metadata.topic_id)
             for claim in claims.get(key, []):
-                claim_supported = False
-                uncached_docs: List[Tuple[str, Any]] = []
+                cached_max = 0.0
+                # No short-circuit: must check ALL docs to find the true max.
                 for doc_id, doc in response.documents.items():
                     key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
                     if key_str in nli_scores_cache:
-                        if nli_scores_cache[key_str] == 1:
-                            claim_supported = True
+                        cached_max = max(cached_max, float(nli_scores_cache[key_str]))
                     else:
-                        uncached_docs.append((doc_id, doc))
-                score_dict[(key, claim)] = 1 if claim_supported else 0
-                if not claim_supported:
-                    for doc_id, doc in uncached_docs:
                         pairs.append((doc.text, claim))
                         pair_index.append((key, doc_id, claim))
+                # Seed with the cached max; uncached pair scores will update it below.
+                score_dict[(key, claim)] = cached_max
 
         CHUNK_SIZE = 500
         if pairs:
@@ -549,11 +534,10 @@ class MinnaLeaderboardJudge:
                     idx = i + j
                     key, doc_id, claim = pair_index[idx]
                     key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
-                    # HHEM outputs single float (0-1), threshold at 0.5
-                    raw_nli = 1 if float(score) > 0.5 else 0
-                    nli_scores_cache[key_str] = raw_nli
-                    if raw_nli == 1:
-                        score_dict[(key, claim)] = 1
+                    float_score = float(score)
+                    nli_scores_cache[key_str] = float_score
+                    if float_score > score_dict.get((key, claim), 0.0):
+                        score_dict[(key, claim)] = float_score
                 # save cache every 10 chunks to avoid losing progress
                 if (i // CHUNK_SIZE) % 10 == 9:
                     save_cache(nli_scores_cache, nli_scores_cache_path)
@@ -563,7 +547,7 @@ class MinnaLeaderboardJudge:
         # ── Stage 2b: Citation accuracy (fragment × first cited doc) ────
         # Uses deberta-v3-base NLI with strict 3-class entailment (run4 approach).
         # Separate cache from HHEM citation cache so they don't collide.
-        citation_cache_path = f"{cache_filebase}.citation_deberta_cache.json"
+        citation_cache_path = f"{cache_dir}/citation_deberta_cache_{cache_tag}.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
@@ -630,16 +614,15 @@ class MinnaLeaderboardJudge:
         save_cache(citation_cache, citation_cache_path)
 
         
-        # ── Pass 1: collect per-response (attribution, cite_acc, ret_qual) ──
-        # Needed before the leaderboard loop because Proposal A requires the
-        # global means of attribution and cite_acc to compute the rescale factor.
-        per_response: Dict[Tuple[str, str], Dict[str, float]] = {}
+        # ── Build leaderboard with FINAL_SCORE_V3 ───────────────────────────
+        builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
+            topic_id = response.metadata.topic_id
 
             claim_list = claims.get(key, [])
             if claim_list:
-                attribution = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list)
+                attribution = sum(score_dict.get((key, c), 0.0) for c in claim_list) / len(claim_list)
             else:
                 attribution = 0.0
 
@@ -648,62 +631,18 @@ class MinnaLeaderboardJudge:
 
             ret_qual = retrieval_quality.get(key, 0.0)
 
-            per_response[key] = {
-                "attribution": attribution,
-                "cite_acc": cite_acc,
-                "ret_qual": ret_qual,
-            }
-
-        # Compute global means for Proposal A's mean-normalized max.
-        # cite is harsh (avg ~0.05-0.15) while attr is generous (avg ~0.7-0.9),
-        # so without rescaling the max() in run9's formula always picks attr.
-        all_attr_vals = [v["attribution"] for v in per_response.values()]
-        all_cite_vals = [v["cite_acc"] for v in per_response.values()]
-        attr_mean = sum(all_attr_vals) / max(len(all_attr_vals), 1)
-        cite_mean = sum(all_cite_vals) / max(len(all_cite_vals), 1)
-        cite_scale = attr_mean / max(cite_mean, 1e-6)
-        print(f"Mean normalization: attr_mean={attr_mean:.4f}, "
-              f"cite_mean={cite_mean:.4f}, cite_scale={cite_scale:.2f}")
-
-        # ── Pass 2: build leaderboard with all three FINAL variants ─────────
-        builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
-        for response in responses:
-            key = (response.metadata.run_id, response.metadata.topic_id)
-            topic_id = response.metadata.topic_id
-            text = response.get_report_text()
-            text_id = doc_id_md5(text)
-
-            s = per_response[key]
-            attribution = s["attribution"]
-            cite_acc = s["cite_acc"]
-            ret_qual = s["ret_qual"]
-
-            completeness = qrels_dict.get((topic_id, text_id), 0) / 3.0
-
-            # Proposal A: mean-normalized max — fixes run9's bias toward attr
-            cite_norm = min(1.0, cite_acc * cite_scale)
-            final_a = 0.5 * (max(cite_norm, attribution) + ret_qual)
-
-            # Proposal B: dual parallel finals, picks dominant cluster
-            content_final = 0.5 * attribution + 0.5 * ret_qual
-            citation_final = 0.7 * cite_acc + 0.3 * ret_qual
-            final_b = max(content_final, citation_final)
-
-            # Proposal C: run9's formula + small additive citation bonus
-            final_c = 0.5 * (max(cite_acc, attribution) + ret_qual) + 0.10 * cite_acc
-            final_c = min(1.0, final_c)  # cap at 1 since the bonus can push above
+            # FINAL_SCORE_V3: run9's formula + small additive citation bonus
+            final_v3 = 0.5 * (max(cite_acc, attribution) + ret_qual) + 0.10 * cite_acc
+            final_v3 = min(1.0, final_v3)  # cap at 1 since the bonus can push above
 
             builder.add(
                 run_id=response.metadata.run_id,
                 topic_id=topic_id,
                 values={
-                    "COMPLETENESS_SCORE": completeness,
                     "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
-                    "FINAL_SCORE": final_a,
-                    "FINAL_SCORE_V2": final_b,
-                    "FINAL_SCORE_V3": final_c,
+                    "FINAL_SCORE_V3": final_v3,
                 },
             )
 
@@ -712,7 +651,7 @@ class MinnaLeaderboardJudge:
             on_missing=on_missing_evals,
         )
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
-              f" (FINAL=mean-norm-max, V2=dual-max, V3=run9+0.1cite)")
+              f" (FINAL_SCORE_V3 = run9+0.1cite)")
 
         return leaderboard
 
