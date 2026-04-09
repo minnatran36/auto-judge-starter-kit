@@ -12,7 +12,6 @@ import asyncio
 import json
 import dataclasses
 import os
-import hashlib
 from autojudge_base import (
     LlmConfigProtocol,
     Report,
@@ -32,11 +31,10 @@ from autojudge_base.nugget_data import (
     NuggetBank,
     NuggetQuestion,
 )
-from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
+from minima_llm import MinimaLlmConfig, MinimaLlmRequest, OpenAIMinimaLlm
 from transformers import AutoModelForSequenceClassification, T5Tokenizer
 from sentence_transformers import CrossEncoder
 import torch
-# pairwise_judge kept in repo but not used in this FINAL_SCORE formula
 
 
 class _VectaraHHEM:
@@ -221,7 +219,6 @@ class MinnaQrelsCreator:
         llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         grade_range: Tuple[int, int] = (0, 3),
-        length_threshold: int = 100,
         **kwargs: Any,
     ) -> Optional[Qrels]:
 
@@ -299,15 +296,6 @@ class MinnaQrelsCreator:
         except:
             return 0
 
-    def _parse_binary(self, result) -> int:
-        try:
-            text = result.text.strip().lower()
-            if text.startswith("1") or text.startswith("yes"):
-                return 1
-            return 0
-        except:
-            return 0
-
 
 # =============================================================================
 # Cache helpers
@@ -336,8 +324,6 @@ class MinnaLeaderboardJudge:
         rag_topics: Sequence[Request],
         llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
-        qrels: Optional[Qrels] = None,
-        keyword_bonus: float = 0.2,
         on_missing_evals: str = "fix_aggregate",
         **kwargs: Any,
     ) -> Leaderboard:
@@ -348,6 +334,7 @@ class MinnaLeaderboardJudge:
         # instead of binary 0/1.
         cache_dir = "output-kiddie"
         cache_tag = "mission2"
+        os.makedirs(cache_dir, exist_ok=True)
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
