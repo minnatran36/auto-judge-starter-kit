@@ -74,17 +74,18 @@ citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
 
-# FINAL_SCORE_V3 (mission3):
-#   0.4*resp_nug + 0.3*max(cite, attr) + 0.2*ret + 0.10*cite
-#
-# resp_nug = response-level nugget grading (0-5 scale, continuous mean).
-# Shares the qrels-stage LLM cache so no duplicate calls.
+# Three FINAL formulas to compare:
+#   FINAL1 = 0.6*ret + 0.4*attr
+#   FINAL2 = 0.5*(max(cite, attr) + ret)
+#   FINAL3 = 0.39*ret + 0.34*attr + 0.27*cite
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
     MeasureSpec("RESPONSE_NUGGET_SCORE"),
-    MeasureSpec("FINAL_SCORE_V3"),
+    MeasureSpec("FINAL1"),
+    MeasureSpec("FINAL2"),
+    MeasureSpec("FINAL3"),
 ))
 
 
@@ -704,18 +705,9 @@ class MinnaLeaderboardJudge:
             ret_qual = retrieval_quality.get(key, 0.0)
             resp_nug = response_nugget_score.get(key, 0.0)
 
-            # FINAL_SCORE_V3 (mission3):
-            #   0.4 * resp_nug         response-level nugget grading (new)
-            # + 0.3 * max(cite, attr)  best of citation accuracy or attribution
-            # + 0.2 * ret_qual         retrieval-quality (docs vs nugget)
-            # + 0.10 * cite_acc        citation precision kicker
-            final_v3 = (
-                0.4 * resp_nug
-                + 0.3 * max(cite_acc, attribution)
-                + 0.2 * ret_qual
-                + 0.10 * cite_acc
-            )
-            final_v3 = min(1.0, final_v3)
+            final1 = 0.6 * ret_qual + 0.4 * attribution
+            final2 = 0.5 * (max(cite_acc, attribution) + ret_qual)
+            final3 = 0.39 * ret_qual + 0.34 * attribution + 0.27 * cite_acc
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -725,7 +717,9 @@ class MinnaLeaderboardJudge:
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
                     "RESPONSE_NUGGET_SCORE": resp_nug,
-                    "FINAL_SCORE_V3": final_v3,
+                    "FINAL1": final1,
+                    "FINAL2": final2,
+                    "FINAL3": final3,
                 },
             )
 
@@ -733,8 +727,10 @@ class MinnaLeaderboardJudge:
             expected_topic_ids=expected_topic_ids,
             on_missing=on_missing_evals,
         )
-        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
-              f" (FINAL_SCORE_V3 = 0.4*resp_nug + 0.3*max(cite,attr) + 0.2*ret + 0.10*cite)")
+        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
+        print("  FINAL1 = 0.6*ret + 0.4*attr")
+        print("  FINAL2 = 0.5*(max(cite,attr) + ret)")
+        print("  FINAL3 = 0.39*ret + 0.34*attr + 0.27*cite")
 
         return leaderboard
 
