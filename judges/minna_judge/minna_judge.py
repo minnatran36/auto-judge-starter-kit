@@ -283,11 +283,23 @@ class MinnaQrelsCreator:
         if requests_info:
             print(f"MinnaQrelsCreator: Sending {len(requests_info)} LLM grading requests "
                   f"({len(cache)} already cached)...")
-            results = asyncio.run(backend.run_batched([req for _, _, _, req in requests_info]))
-            for (run_id, topic_id, nug_id, _), result in zip(requests_info, results):
-                cache_key = f"{run_id}_{topic_id}_{nug_id}"
-                cache[cache_key] = self._parse_graded(result)
-            save_cache(cache, self.CACHE_PATH)
+            # Process in chunks so partial progress is saved if the batch crashes.
+            BATCH_SIZE = 5000
+            for batch_start in range(0, len(requests_info), BATCH_SIZE):
+                batch = requests_info[batch_start:batch_start + BATCH_SIZE]
+                try:
+                    results = asyncio.run(backend.run_batched([req for _, _, _, req in batch]))
+                    for (run_id, topic_id, nug_id, _), result in zip(batch, results):
+                        cache_key = f"{run_id}_{topic_id}_{nug_id}"
+                        cache[cache_key] = self._parse_graded(result)
+                except Exception as e:
+                    print(f"WARNING: Batch {batch_start}-{batch_start + len(batch)} failed: {e}")
+                    print(f"  Saving {len(cache)} cached grades before re-raising...")
+                    save_cache(cache, self.CACHE_PATH)
+                    raise
+                save_cache(cache, self.CACHE_PATH)
+                print(f"  Qrels progress: {min(batch_start + BATCH_SIZE, len(requests_info))}/{len(requests_info)} "
+                      f"submitted, {len(cache)} total cached")
 
         # Aggregate per (run, topic): average all per-nugget grades and round
         # to the integer qrels scale [0..max_grade] for the .qrels.txt file.
@@ -425,23 +437,33 @@ class MinnaLeaderboardJudge:
 
             if retrieval_requests:
                 print(f"RetrievalQuality: Sending {len(retrieval_requests)} LLM requests...")
-                ret_results = asyncio.run(backend.run_batched(
-                    [req for _, _, _, req in retrieval_requests]
-                ))
-                for (run_id, topic_id, nug_id, _), result in zip(retrieval_requests, ret_results):
-                    cache_key = f"{run_id}_{topic_id}_{nug_id}"
-                    # Parse graded 0/1/2 response (same logic as qrels grading)
+                BATCH_SIZE = 5000
+                for batch_start in range(0, len(retrieval_requests), BATCH_SIZE):
+                    batch = retrieval_requests[batch_start:batch_start + BATCH_SIZE]
                     try:
-                        text = result.text.strip()
-                        score = 0
-                        for char in text:
-                            if char in ("0", "1", "2"):
-                                score = int(char)
-                                break
-                    except:
-                        score = 0
-                    retrieval_cache[cache_key] = score
-                save_cache(retrieval_cache, retrieval_cache_path)
+                        ret_results = asyncio.run(backend.run_batched(
+                            [req for _, _, _, req in batch]
+                        ))
+                        for (run_id, topic_id, nug_id, _), result in zip(batch, ret_results):
+                            cache_key = f"{run_id}_{topic_id}_{nug_id}"
+                            try:
+                                text = result.text.strip()
+                                score = 0
+                                for char in text:
+                                    if char in ("0", "1", "2"):
+                                        score = int(char)
+                                        break
+                            except:
+                                score = 0
+                            retrieval_cache[cache_key] = score
+                    except Exception as e:
+                        print(f"WARNING: Retrieval batch {batch_start}-{batch_start + len(batch)} failed: {e}")
+                        print(f"  Saving {len(retrieval_cache)} cached scores before re-raising...")
+                        save_cache(retrieval_cache, retrieval_cache_path)
+                        raise
+                    save_cache(retrieval_cache, retrieval_cache_path)
+                    print(f"  RetrievalQuality progress: {min(batch_start + BATCH_SIZE, len(retrieval_requests))}/{len(retrieval_requests)} "
+                          f"submitted, {len(retrieval_cache)} total cached")
 
             # Aggregate: for each (run, topic), average the per-nugget scores
             # and normalize to 0-1 (max per nugget is 2)
@@ -520,24 +542,31 @@ class MinnaLeaderboardJudge:
                 )
             ))
 
-        results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
-
         claims: Dict[Tuple[str, str], List[str]] = {}
         for key, value in claims_cache.items():
             r_id, t_id = key.split("_", 1)
             claims[(r_id, t_id)] = value
 
-        for (run_id, topic_id, _), result in zip(requests_info, results):
-            key = f"{run_id}_{topic_id}"
+        if requests_info:
+            print(f"Claims extraction: Sending {len(requests_info)} LLM requests "
+                  f"({len(claims_cache)} already cached)...")
             try:
-                parsed = json.loads(result.text)
-            except (json.JSONDecodeError, AttributeError):
-                parsed = []
-            parsed = [c for c in parsed if isinstance(c, str) and len(c.strip()) >= 10]
-            claims[(run_id, topic_id)] = parsed
-            claims_cache[key] = parsed
-
-        save_cache(claims_cache, claims_cache_path)
+                results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
+                for (run_id, topic_id, _), result in zip(requests_info, results):
+                    key = f"{run_id}_{topic_id}"
+                    try:
+                        parsed = json.loads(result.text)
+                    except (json.JSONDecodeError, AttributeError):
+                        parsed = []
+                    parsed = [c for c in parsed if isinstance(c, str) and len(c.strip()) >= 10]
+                    claims[(run_id, topic_id)] = parsed
+                    claims_cache[key] = parsed
+            except Exception as e:
+                print(f"WARNING: Claims batch failed: {e}")
+                print(f"  Saving {len(claims_cache)} cached claims before re-raising...")
+                save_cache(claims_cache, claims_cache_path)
+                raise
+            save_cache(claims_cache, claims_cache_path)
 
         # ── Stage 2a: Attribution score (claim × all docs, continuous max-pool) ──
         # Each (claim, doc) pair stores the raw HHEM float in [0, 1]; per-claim
