@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-# RUN7A
+# SUBMISSION 2
 
 import warnings
 import logging
-warnings.filterwarnings("ignore", message="Be aware, overflowing tokens")
-warnings.filterwarnings("ignore", message="You are using the default legacy behaviour")
-logging.getLogger("transformers").setLevel(logging.ERROR)
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 import asyncio
@@ -53,9 +50,7 @@ class _VectaraHHEM:
         scores = []
         for i in range(0, len(sentence_pairs), batch_size):
             batch = sentence_pairs[i:i + batch_size]
-            # FIX: max_length=512 prevents tokenizer from processing full doc texts
-            # before truncating — this was causing millions of "overflowing tokens"
-            # warnings and wasting CPU time on text that gets thrown away
+            
             inputs = self._tokenizer(
                 [p[0] for p in batch], [p[1] for p in batch],
                 return_tensors="pt", padding=True, truncation=True,
@@ -74,18 +69,13 @@ citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
 
-# Three FINAL formulas to compare:
-#   FINAL1 = 0.6*ret + 0.4*attr
-#   FINAL2 = 0.5*(max(cite, attr) + ret)
-#   FINAL3 = 0.39*ret + 0.34*attr + 0.27*cite
+# FINAL = 0.5*(max(cite, attr) + ret)
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
     MeasureSpec("RESPONSE_NUGGET_SCORE"),
-    MeasureSpec("FINAL1"),
-    MeasureSpec("FINAL2"),
-    MeasureSpec("FINAL3"),
+    MeasureSpec("FINAL"),
 ))
 
 
@@ -129,7 +119,7 @@ class MinnaNuggetCreator:
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
 
-        # fix2-6: collect diverse response samples to inform nugget generation
+        # fix2-6: collect diverse response samples to inform nugget generation -- not very effective
         responses = list(rag_responses)
         response_samples: Dict[str, List[str]] = {}
         for resp in responses:
@@ -149,8 +139,7 @@ class MinnaNuggetCreator:
             else:
                 context = topic.problem_statement
 
-            # include response samples in nugget prompt so nuggets
-            # better discriminate between good and bad responses
+            # include response samples in nugget prompt -- not very effective
             samples = response_samples.get(topic.request_id, [])
             if samples:
                 sample_text = "\n---\n".join(samples)
@@ -217,9 +206,6 @@ class MinnaNuggetCreator:
 # =============================================================================
 
 class MinnaQrelsCreator:
-    # Shared cache between qrels stage and judge() response-nugget stage:
-    # both ask the LLM the same question (graded 0-5) so each (response, nugget)
-    # pair is only ever scored once.
     CACHE_DIR = "output-kiddie"
     CACHE_TAG = "mission3"
     CACHE_PATH = f"{CACHE_DIR}/qrels_grades_cache_{CACHE_TAG}.json"
@@ -284,7 +270,7 @@ class MinnaQrelsCreator:
         if requests_info:
             print(f"MinnaQrelsCreator: Sending {len(requests_info)} LLM grading requests "
                   f"({len(cache)} already cached)...")
-            # Process in chunks so partial progress is saved if the batch crashes.
+            # Process in chunks so progress is saved if crashes.
             BATCH_SIZE = 5000
             for batch_start in range(0, len(requests_info), BATCH_SIZE):
                 batch = requests_info[batch_start:batch_start + BATCH_SIZE]
@@ -302,8 +288,7 @@ class MinnaQrelsCreator:
                 print(f"  Qrels progress: {min(batch_start + BATCH_SIZE, len(requests_info))}/{len(requests_info)} "
                       f"submitted, {len(cache)} total cached")
 
-        # Aggregate per (run, topic): average all per-nugget grades and round
-        # to the integer qrels scale [0..max_grade] for the .qrels.txt file.
+    
         max_grade = grade_range[1]
         for response in responses:
             topic_id = response.metadata.topic_id
@@ -370,9 +355,9 @@ class MinnaLeaderboardJudge:
         **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
-        # mission3: response-level nugget grading is now in the leaderboard
-        # via RESPONSE_NUGGET_SCORE. Shares the qrels-stage cache (same prompt)
-        # so each (response, nugget) pair is graded by the LLM exactly once.
+
+        # RESPONSE_NUGGET_SCORE. Shares qrels-stage cache 
+      
         cache_dir = "output-kiddie"
         cache_tag = "mission3"
         os.makedirs(cache_dir, exist_ok=True)
@@ -384,7 +369,7 @@ class MinnaLeaderboardJudge:
 
         retrieval_cache_path = f"{cache_dir}/retrieval_quality_cache_{cache_tag}.json"
         retrieval_cache = load_cache(retrieval_cache_path)
-        # Each request checks one (system, topic, nugget) triple
+        # Each request checks (system, topic, nugget) 
         retrieval_requests: List[Tuple[str, str, str, MinimaLlmRequest]] = []
 
         retrieval_quality: Dict[Tuple[str, str], float] = {}
@@ -400,9 +385,8 @@ class MinnaLeaderboardJudge:
 
                 nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
 
-                # Build a single "retrieval context" string from this system's
-                # docs for this topic. We truncate each doc to 1000 chars and
-                # cap at 20 docs to stay within LLM context limits.
+                # Build a single "retrieval context",
+                # truncate each doc to 1000 chars & cap at 20 docs 
                 doc_texts = []
                 for doc_id, doc in response.documents.items():
                     doc_texts.append(doc.text[:1000])
@@ -413,8 +397,7 @@ class MinnaLeaderboardJudge:
                     if cache_key in retrieval_cache:
                         continue
 
-                    # Ask the LLM: do these docs answer this sub-question?
-                    # Graded 0/1/2 for consistency with the qrels grading scheme
+               
                     retrieval_requests.append((
                         run_id, topic_id, nugget.question_id,
                         MinimaLlmRequest(
@@ -466,7 +449,6 @@ class MinnaLeaderboardJudge:
                     print(f"  RetrievalQuality progress: {min(batch_start + BATCH_SIZE, len(retrieval_requests))}/{len(retrieval_requests)} "
                           f"submitted, {len(retrieval_cache)} total cached")
 
-            # Aggregate: for each (run, topic), average the per-nugget scores
             # and normalize to 0-1 (max per nugget is 2)
             for response in responses:
                 topic_id = response.metadata.topic_id
@@ -484,11 +466,7 @@ class MinnaLeaderboardJudge:
 
         print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
 
-        # ── Stage RN: Response-level nugget grading (shares qrels cache) ────
-        # Reads the per-(response, nugget) 0-5 grades produced by MinnaQrelsCreator,
-        # and aggregates them as a continuous mean in [0, 1] per (run, topic).
-        # If the qrels stage didn't run (judge-only mode), this falls through
-        # with empty scores; everything still works but RESPONSE_NUGGET_SCORE = 0.
+    
         qrels_grades_cache_path = MinnaQrelsCreator.CACHE_PATH
         qrels_grades_cache = load_cache(qrels_grades_cache_path)
         response_nugget_score: Dict[Tuple[str, str], float] = {}
@@ -512,7 +490,7 @@ class MinnaLeaderboardJudge:
         print(f"ResponseNugget: Scored {len(response_nugget_score)} (run, topic) pairs "
               f"from {len(qrels_grades_cache)} cached grades")
 
-        # ── Stage 1: Claims extraction ────────────────
+        # ──────────────── Claims extraction ────────────────
         claims_cache_path = f"{cache_dir}/claims_cache_{cache_tag}.json"
         claims_cache = load_cache(claims_cache_path)
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
@@ -570,9 +548,7 @@ class MinnaLeaderboardJudge:
             save_cache(claims_cache, claims_cache_path)
 
         # ── Stage 2a: Attribution score (claim × all docs, continuous max-pool) ──
-        # Each (claim, doc) pair stores the raw HHEM float in [0, 1]; per-claim
-        # score = max over docs (preserves "any doc entails" semantics but keeps
-        # the strength signal that the old 0.5 threshold threw away).
+        # get max (claim, doc)
         nli_scores_cache_path = f"{cache_dir}/nli_scores_continuous_{cache_tag}.json"
         nli_scores_cache = load_cache(nli_scores_cache_path)
         score_dict: Dict[Tuple[Tuple[str, str], str], float] = {}
@@ -586,7 +562,7 @@ class MinnaLeaderboardJudge:
             key = (response.metadata.run_id, response.metadata.topic_id)
             for claim in claims.get(key, []):
                 cached_max = 0.0
-                # No short-circuit: must check ALL docs to find the true max.
+                # must check ALL docs to find max.
                 for doc_id, doc in response.documents.items():
                     key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
                     if key_str in nli_scores_cache:
@@ -594,7 +570,6 @@ class MinnaLeaderboardJudge:
                     else:
                         pairs.append((doc.text, claim))
                         pair_index.append((key, doc_id, claim))
-                # Seed with the cached max; uncached pair scores will update it below.
                 score_dict[(key, claim)] = cached_max
 
         CHUNK_SIZE = 500
@@ -617,9 +592,7 @@ class MinnaLeaderboardJudge:
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
-        # ── Stage 2b: Citation accuracy (fragment × first cited doc) ────
-        # Uses deberta-v3-base NLI with strict 3-class entailment (run4 approach).
-        # Separate cache from HHEM citation cache so they don't collide.
+        # ── Stage 2b: Citation accuracy ────
         citation_cache_path = f"{cache_dir}/citation_deberta_cache_{cache_tag}.json"
         citation_cache = load_cache(citation_cache_path)
 
@@ -656,7 +629,6 @@ class MinnaLeaderboardJudge:
                         supported += 1
                     continue
 
-                # run4 approach: check first matching cited doc only (less noise)
                 frag_text = fragment.text
                 for cid in cited_ids:
                     if cid in docs:
@@ -666,7 +638,7 @@ class MinnaLeaderboardJudge:
 
             citation_info[key] = (supported, total_cited)
 
-        # Run deberta NLI on citation pairs
+        # Run deberta NLI 
         if cite_pairs:
             print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
@@ -676,8 +648,7 @@ class MinnaLeaderboardJudge:
                     idx = i + j
                     key, frag_idx = cite_pair_index[idx]
                     cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-                    # deberta outputs [contradiction, entailment, neutral]
-                    # strict: entailment must be the dominant class
+                    # entailment must be largest
                     is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
                     citation_cache[cache_key] = is_supported
                     if is_supported:
@@ -687,7 +658,7 @@ class MinnaLeaderboardJudge:
         save_cache(citation_cache, citation_cache_path)
 
         
-        # ── Build leaderboard with FINAL_SCORE_V3 ───────────────────────────
+        # ── Build leaderboard───────────────────────────
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -705,9 +676,7 @@ class MinnaLeaderboardJudge:
             ret_qual = retrieval_quality.get(key, 0.0)
             resp_nug = response_nugget_score.get(key, 0.0)
 
-            final1 = 0.6 * ret_qual + 0.4 * attribution
-            final2 = 0.5 * (max(cite_acc, attribution) + ret_qual)
-            final3 = 0.39 * ret_qual + 0.34 * attribution + 0.27 * cite_acc
+            final = 0.5 * (max(cite_acc, attribution) + ret_qual)
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -717,9 +686,7 @@ class MinnaLeaderboardJudge:
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
                     "RESPONSE_NUGGET_SCORE": resp_nug,
-                    "FINAL1": final1,
-                    "FINAL2": final2,
-                    "FINAL3": final3,
+                    "FINAL": final,
                 },
             )
 
@@ -727,10 +694,8 @@ class MinnaLeaderboardJudge:
             expected_topic_ids=expected_topic_ids,
             on_missing=on_missing_evals,
         )
-        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
-        print("  FINAL1 = 0.6*ret + 0.4*attr")
-        print("  FINAL2 = 0.5*(max(cite,attr) + ret)")
-        print("  FINAL3 = 0.39*ret + 0.34*attr + 0.27*cite")
+        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
+              f" (FINAL = 0.5*(max(cite,attr) + ret))")
 
         return leaderboard
 

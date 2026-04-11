@@ -69,4 +69,7 @@ jobs
 tail -20 output-kiddie/judge_run.log
 
 
-nohup auto-judge run --workflow judges/minna_judge/workflow_extra.yml     --rag-responses data/kiddie/runs/repgen/     --rag-topics data/kiddie/topics/kiddie-topics.jsonl     --out-dir ./output-extra/
+PYTHONUNBUFFERED=1 nohup auto-judge run --workflow judges/minna_judge/workflow.yml \
+  --rag-responses data/kiddie/runs/repgen/ \
+  --rag-topics data/kiddie/topics/ragtime25_main_all.jsonl \
+  --out-dir ./output-kiddie/ > output-kiddie/judge_run.log 2>&1 &
