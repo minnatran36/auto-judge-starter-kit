@@ -768,8 +768,8 @@ class MinnaLeaderboardJudge:
 
         # ── Stage D2: Score claims against disc. nuggets (GPU, no LLM) ─────
         # For each (response, topic): build (nugget, claim) pairs, score with
-        # ms-marco cross-encoder, take mean of max-per-nugget.
-        disc_scores_cache_path = f"{cache_dir}/disc_scores_cache_{cache_tag}.json"
+        # HHEM (entailment), take mean of max-per-nugget.
+        disc_scores_cache_path = f"{cache_dir}/disc_scores_hhem_cache_{cache_tag}.json"
         disc_scores_cache = load_cache(disc_scores_cache_path)
         disc_score: Dict[Tuple[str, str], float] = {}
 
@@ -804,15 +804,15 @@ class MinnaLeaderboardJudge:
             print(f"DiscriminativeScore: {len(disc_pairs)} (nugget, claim) pairs "
                   f"to score on GPU...", flush=True)
 
-            # Score all pairs with cross-encoder
-            DISC_CHUNK = 512
+            # Score all pairs with HHEM (entailment: does the claim support the nugget?)
+            DISC_CHUNK = 500
             all_disc_scores: List[float] = []
             for i in range(0, len(disc_pairs), DISC_CHUNK):
                 chunk = disc_pairs[i:i + DISC_CHUNK]
-                chunk_scores = disc_qa_model.predict(chunk)
+                chunk_scores = nli_model.predict(chunk)
                 all_disc_scores.extend(float(s) for s in chunk_scores)
                 if (i // DISC_CHUNK) % 50 == 49:
-                    print(f"  DiscriminativeScore: {min(i + DISC_CHUNK, len(disc_pairs))}/{len(disc_pairs)} done",
+                    print(f"  DiscriminativeScore (HHEM): {min(i + DISC_CHUNK, len(disc_pairs))}/{len(disc_pairs)} done",
                           flush=True)
 
             # Aggregate: per (run, topic), build nugget × claim matrix,
