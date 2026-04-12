@@ -74,7 +74,9 @@ print("disc_qa_model: loaded cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
 # FINAL  = 0.5*(max(cite, attr) + ret)
-# FINAL2 = FINAL + 0.02*disc (tie-breaker)
+# FINAL2 = FINAL + 0.02*disc
+# FINAL3 = FINAL + 0.05*disc
+# FINAL4 = FINAL + 0.10*disc
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
@@ -83,6 +85,8 @@ MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("DISCRIMINATIVE_SCORE"),
     MeasureSpec("FINAL"),
     MeasureSpec("FINAL2"),
+    MeasureSpec("FINAL3"),
+    MeasureSpec("FINAL4"),
 ))
 
 
@@ -859,6 +863,8 @@ class MinnaLeaderboardJudge:
 
             final = 0.5 * (max(cite_acc, attribution) + ret_qual)
             final2 = final + 0.02 * disc
+            final3 = final + 0.05 * disc
+            final4 = final + 0.10 * disc
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -871,6 +877,8 @@ class MinnaLeaderboardJudge:
                     "DISCRIMINATIVE_SCORE": disc,
                     "FINAL": final,
                     "FINAL2": final2,
+                    "FINAL3": final3,
+                    "FINAL4": final4,
                 },
             )
 
@@ -881,6 +889,8 @@ class MinnaLeaderboardJudge:
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
         print("  FINAL  = 0.5*(max(cite,attr) + ret)")
         print("  FINAL2 = FINAL + 0.02*disc")
+        print("  FINAL3 = FINAL + 0.05*disc")
+        print("  FINAL4 = FINAL + 0.10*disc")
 
         return leaderboard
 
