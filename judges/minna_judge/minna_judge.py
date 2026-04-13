@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SUBMISSION 3 TEST1
+# SUBMISSION 3 Continuous Citation
 
 import warnings
 import logging
@@ -68,25 +68,15 @@ nli_model = _VectaraHHEM()
 citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
-# ms-marco cross-encoder for discriminative nugget scoring
-disc_qa_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-print("disc_qa_model: loaded cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
-# FINAL  = 0.5*(max(cite, attr) + ret)
-# FINAL2 = FINAL + 0.02*disc
-# FINAL3 = FINAL + 0.05*disc
-# FINAL4 = FINAL + 0.10*disc
+# FINAL = 0.5*(max(cite, attr) + ret)
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
     MeasureSpec("RESPONSE_NUGGET_SCORE"),
-    MeasureSpec("DISCRIMINATIVE_SCORE"),
     MeasureSpec("FINAL"),
-    MeasureSpec("FINAL2"),
-    MeasureSpec("FINAL3"),
-    MeasureSpec("FINAL4"),
 ))
 
 
@@ -603,23 +593,23 @@ class MinnaLeaderboardJudge:
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
-        # ── Stage 2b: Citation accuracy ────
-        citation_cache_path = f"{cache_dir}/citation_deberta_cache_{cache_tag}.json"
+        # ── Stage 2b: Citation accuracy (continuous, all cited docs) ────
+        # For each cited fragment, check ALL cited docs (not just the first),
+        # store continuous entailment float, max-pool across cited docs per fragment.
+        citation_cache_path = f"{cache_dir}/citation_continuous_cache_{cache_tag}.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
-        cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
+        cite_pair_index: List[Tuple[Tuple[str, str], int, int]] = []
 
-        citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
+        # Track which fragments have citations and how many cited docs each has
+        frag_cite_counts: Dict[Tuple[Tuple[str, str], int], int] = {}
 
         for response in responses:
             if not response.responses:
                 continue
             key = (response.metadata.run_id, response.metadata.topic_id)
             docs = response.documents or {}
-
-            supported = 0
-            total_cited = 0
 
             for frag_idx, fragment in enumerate(response.responses):
                 cited_ids = []
@@ -632,215 +622,55 @@ class MinnaLeaderboardJudge:
                 if not cited_ids:
                     continue
 
-                total_cited += 1
-                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-
-                if cache_key in citation_cache:
-                    if citation_cache[cache_key] == 1:
-                        supported += 1
-                    continue
-
                 frag_text = fragment.text
-                for cid in cited_ids:
-                    if cid in docs:
+                cite_doc_count = 0
+
+                # Check ALL cited docs, not just the first
+                for cite_doc_idx, cid in enumerate(cited_ids):
+                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}_{cite_doc_idx}"
+                    if cache_key not in citation_cache and cid in docs:
                         cite_pairs.append((docs[cid].text, frag_text))
-                        cite_pair_index.append((key, frag_idx))
-                        break
+                        cite_pair_index.append((key, frag_idx, cite_doc_idx))
+                    if cid in docs:
+                        cite_doc_count += 1
 
-            citation_info[key] = (supported, total_cited)
+                if cite_doc_count > 0:
+                    frag_cite_counts[(key, frag_idx)] = cite_doc_count
 
-        # Run deberta NLI 
+        # Run deberta NLI on all citation pairs
         if cite_pairs:
-            print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
+            print(f"Citation NLI (deberta, continuous): {len(cite_pairs)} pairs", flush=True)
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
                 chunk_scores = citation_nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
                 print(f"  Citation NLI (deberta): {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
                 for j, score in enumerate(chunk_scores):
                     idx = i + j
-                    key, frag_idx = cite_pair_index[idx]
-                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-                    # entailment must be largest
-                    is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
-                    citation_cache[cache_key] = is_supported
-                    if is_supported:
-                        prev_sup, prev_total = citation_info[key]
-                        citation_info[key] = (prev_sup + 1, prev_total)
+                    key, frag_idx, cite_doc_idx = cite_pair_index[idx]
+                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}_{cite_doc_idx}"
+                    citation_cache[cache_key] = float(score[1])
 
         save_cache(citation_cache, citation_cache_path)
 
-        # ── Stage D1: Extract discriminative nuggets (LLM, 122 calls) ──────
-        # Per topic: pick best/worst by retrieval quality, ask LLM what
-        # specific facts are in the good docs but missing from the bad.
-        disc_nuggets_cache_path = f"{cache_dir}/disc_nuggets_cache_{cache_tag}.json"
-        disc_nuggets_cache = load_cache(disc_nuggets_cache_path)
-        disc_nuggets: Dict[str, List[str]] = {}  # topic_id → list of nugget strings
+        # Aggregate: per fragment → max entailment across all cited docs.
+        # Per response → mean of per-fragment max scores.
+        citation_scores: Dict[Tuple[str, str], float] = {}
+        # Group fragments by response key
+        response_frags: Dict[Tuple[str, str], List[int]] = {}
+        for (key, frag_idx), doc_count in frag_cite_counts.items():
+            response_frags.setdefault(key, []).append(frag_idx)
 
-        # Build lookup: topic_id → list of (run_id, ret_score, response)
-        topic_responses: Dict[str, List[Tuple[str, float, Report]]] = {}
-        for response in responses:
-            topic_id = response.metadata.topic_id
-            run_id = response.metadata.run_id
-            ret_score = retrieval_quality.get((run_id, topic_id), 0.0)
-            topic_responses.setdefault(topic_id, []).append((run_id, ret_score, response))
-
-        disc_llm_requests: List[Tuple[str, MinimaLlmRequest]] = []
-
-        for topic_id, resp_list in topic_responses.items():
-            # Check cache first
-            if topic_id in disc_nuggets_cache:
-                disc_nuggets[topic_id] = disc_nuggets_cache[topic_id]
-                continue
-
-            # Sort by retrieval quality
-            resp_list.sort(key=lambda x: x[1])
-            _, worst_score, worst_resp = resp_list[0]
-            _, best_score, best_resp = resp_list[-1]
-
-            # Skip if gap too small — both retrieved similar quality docs
-            if best_score - worst_score < 0.1:
-                disc_nuggets[topic_id] = []
-                disc_nuggets_cache[topic_id] = []
-                continue
-
-            # Build doc text for best and worst
-            def _docs_text(resp: Report) -> str:
-                if not resp.documents:
-                    return "(no documents)"
-                texts = [doc.text[:1000] for _, doc in resp.documents.items()]
-                return "\n---\n".join(texts[:20])
-
-            best_docs_text = _docs_text(best_resp)
-            worst_docs_text = _docs_text(worst_resp)
-
-            # Find topic question
-            topic_question = ""
-            for t in rag_topics:
-                if t.request_id == topic_id:
-                    topic_question = t.problem_statement or t.title or topic_id
-                    break
-
-            disc_llm_requests.append((
-                topic_id,
-                MinimaLlmRequest(
-                    request_id=f"disc_{topic_id}",
-                    messages=[
-                        {"role": "system", "content": (
-                            "You are an evaluation expert. Compare two sets of retrieved documents "
-                            "for the same question. Identify specific facts, details, statistics, "
-                            "or pieces of evidence that are present in the GOOD documents but "
-                            "missing or poorly covered in the BAD documents. "
-                            "Focus on concrete, verifiable information that would make an answer "
-                            "more complete and accurate. "
-                            "Return ONLY a JSON array of exactly 5 strings."
-                        )},
-                        {"role": "user", "content": (
-                            f"Question: {topic_question}\n\n"
-                            f"GOOD retrieval documents:\n{best_docs_text}\n\n"
-                            f"BAD retrieval documents:\n{worst_docs_text}"
-                        )},
-                    ],
-                    temperature=0.3,
-                )
-            ))
-
-        if disc_llm_requests:
-            print(f"DiscriminativeNuggets: Sending {len(disc_llm_requests)} LLM requests "
-                  f"({len(disc_nuggets_cache)} topics already cached)...")
-            try:
-                disc_results = asyncio.run(backend.run_batched(
-                    [req for _, req in disc_llm_requests]
-                ))
-                for (topic_id, _), result in zip(disc_llm_requests, disc_results):
-                    try:
-                        parsed = json.loads(result.text)
-                        if not isinstance(parsed, list):
-                            parsed = []
-                    except (json.JSONDecodeError, AttributeError):
-                        parsed = []
-                    parsed = [n for n in parsed if isinstance(n, str) and len(n.strip()) >= 10][:5]
-                    disc_nuggets[topic_id] = parsed
-                    disc_nuggets_cache[topic_id] = parsed
-            except Exception as e:
-                print(f"WARNING: Discriminative nuggets batch failed: {e}")
-                save_cache(disc_nuggets_cache, disc_nuggets_cache_path)
-                raise
-            save_cache(disc_nuggets_cache, disc_nuggets_cache_path)
-
-        total_disc_nuggets = sum(len(v) for v in disc_nuggets.values())
-        print(f"DiscriminativeNuggets: {total_disc_nuggets} nuggets across "
-              f"{sum(1 for v in disc_nuggets.values() if v)} topics")
-
-        # ── Stage D2: Score claims against disc. nuggets (GPU, no LLM) ─────
-        # For each (response, topic): build (nugget, claim) pairs, score with
-        # HHEM (entailment), take mean of max-per-nugget.
-        disc_scores_cache_path = f"{cache_dir}/disc_scores_hhem_cache_{cache_tag}.json"
-        disc_scores_cache = load_cache(disc_scores_cache_path)
-        disc_score: Dict[Tuple[str, str], float] = {}
-
-        # Collect all pairs to score in one big batch for GPU efficiency
-        disc_pairs: List[Tuple[str, str]] = []
-        disc_pair_index: List[Tuple[str, str, int, int]] = []  # run_id, topic_id, nugget_idx, claim_idx
-
-        for response in responses:
-            topic_id = response.metadata.topic_id
-            run_id = response.metadata.run_id
-            cache_key = f"{run_id}_{topic_id}"
-
-            # Check cache
-            if cache_key in disc_scores_cache:
-                disc_score[(run_id, topic_id)] = float(disc_scores_cache[cache_key])
-                continue
-
-            topic_nugs = disc_nuggets.get(topic_id, [])
-            response_claims = claims.get((run_id, topic_id), [])
-
-            if not topic_nugs or not response_claims:
-                disc_score[(run_id, topic_id)] = 0.0
-                disc_scores_cache[cache_key] = 0.0
-                continue
-
-            for nug_idx, nugget in enumerate(topic_nugs):
-                for claim_idx, claim in enumerate(response_claims):
-                    disc_pairs.append((nugget, claim))
-                    disc_pair_index.append((run_id, topic_id, nug_idx, claim_idx))
-
-        if disc_pairs:
-            print(f"DiscriminativeScore: {len(disc_pairs)} (nugget, claim) pairs "
-                  f"to score on GPU...", flush=True)
-
-            # Score all pairs with HHEM (entailment: does the claim support the nugget?)
-            DISC_CHUNK = 500
-            all_disc_scores: List[float] = []
-            for i in range(0, len(disc_pairs), DISC_CHUNK):
-                chunk = disc_pairs[i:i + DISC_CHUNK]
-                chunk_scores = nli_model.predict(chunk)
-                all_disc_scores.extend(float(s) for s in chunk_scores)
-                if (i // DISC_CHUNK) % 50 == 49:
-                    print(f"  DiscriminativeScore (HHEM): {min(i + DISC_CHUNK, len(disc_pairs))}/{len(disc_pairs)} done",
-                          flush=True)
-
-            # Aggregate: per (run, topic), build nugget × claim matrix,
-            # take max per nugget row, then mean over nuggets.
-            # First, collect scores by (run_id, topic_id)
-            response_matrices: Dict[Tuple[str, str], Dict[int, List[float]]] = {}
-            for idx, (run_id, topic_id, nug_idx, claim_idx) in enumerate(disc_pair_index):
-                key = (run_id, topic_id)
-                if key not in response_matrices:
-                    response_matrices[key] = {}
-                if nug_idx not in response_matrices[key]:
-                    response_matrices[key][nug_idx] = []
-                response_matrices[key][nug_idx].append(all_disc_scores[idx])
-
-            for key, nug_scores in response_matrices.items():
-                # per nugget: max score across all claims
-                per_nugget_best = [max(scores) for scores in nug_scores.values()]
-                final_disc = sum(per_nugget_best) / len(per_nugget_best)
-                disc_score[key] = final_disc
-                disc_scores_cache[f"{key[0]}_{key[1]}"] = final_disc
-
-            save_cache(disc_scores_cache, disc_scores_cache_path)
-
-        print(f"DiscriminativeScore: Scored {len(disc_score)} (run, topic) pairs")
+        for key, frag_indices in response_frags.items():
+            frag_maxes = []
+            for frag_idx in frag_indices:
+                doc_count = frag_cite_counts[(key, frag_idx)]
+                doc_scores = []
+                for cite_doc_idx in range(doc_count):
+                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}_{cite_doc_idx}"
+                    if cache_key in citation_cache:
+                        doc_scores.append(float(citation_cache[cache_key]))
+                if doc_scores:
+                    frag_maxes.append(max(doc_scores))
+            citation_scores[key] = sum(frag_maxes) / len(frag_maxes) if frag_maxes else 0.0
 
         # ── Build leaderboard───────────────────────────
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
@@ -854,17 +684,12 @@ class MinnaLeaderboardJudge:
             else:
                 attribution = 0.0
 
-            cite_sup, cite_total = citation_info.get(key, (0, 0))
-            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
+            cite_acc = citation_scores.get(key, 0.0)
 
             ret_qual = retrieval_quality.get(key, 0.0)
             resp_nug = response_nugget_score.get(key, 0.0)
-            disc = disc_score.get(key, 0.0)
 
             final = 0.5 * (max(cite_acc, attribution) + ret_qual)
-            final2 = final + 0.02 * disc
-            final3 = final + 0.05 * disc
-            final4 = final + 0.10 * disc
 
             builder.add(
                 run_id=response.metadata.run_id,
@@ -874,11 +699,7 @@ class MinnaLeaderboardJudge:
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
                     "RESPONSE_NUGGET_SCORE": resp_nug,
-                    "DISCRIMINATIVE_SCORE": disc,
                     "FINAL": final,
-                    "FINAL2": final2,
-                    "FINAL3": final3,
-                    "FINAL4": final4,
                 },
             )
 
@@ -886,11 +707,8 @@ class MinnaLeaderboardJudge:
             expected_topic_ids=expected_topic_ids,
             on_missing=on_missing_evals,
         )
-        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries")
-        print("  FINAL  = 0.5*(max(cite,attr) + ret)")
-        print("  FINAL2 = FINAL + 0.02*disc")
-        print("  FINAL3 = FINAL + 0.05*disc")
-        print("  FINAL4 = FINAL + 0.10*disc")
+        print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
+              f" (FINAL = 0.5*(max(cite,attr) + ret))")
 
         return leaderboard
 

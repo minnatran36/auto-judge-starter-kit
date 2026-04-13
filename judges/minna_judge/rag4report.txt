@@ -1,0 +1,11 @@
+CACHE_PATH = "output-rag4report/ragtime1_corpus_cache.json"
+grep -c "intellektom-ne-bleshchut" ~/ragtime1/eng-docs.jsonl
+
+https://huggingface.co/datasets/hltcoe/rag4reports-2026
+
+huggingface-cli download trec-ragtime/ragtime1 --repo-type dataset \
+    --include "eng-docs.jsonl" --local-dir ~/ragtime1
+
+# download just the English split (~1.6GB)
+huggingface-cli download trec-ragtime/ragtime1 --repo-type dataset \
+    --include "*eng*" --local-dir ~/ragtime1
