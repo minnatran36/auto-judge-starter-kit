@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SUBMISSION 3 Continuous Citation
+# SUBMISSION 2
 
 import warnings
 import logging
@@ -67,7 +67,6 @@ nli_model = _VectaraHHEM()
 # deberta NLI for citation accuracy (run4 approach: strict 3-class entailment)
 citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
 print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
-
 
 
 # FINAL = 0.5*(max(cite, attr) + ret)
@@ -593,23 +592,23 @@ class MinnaLeaderboardJudge:
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
-        # ── Stage 2b: Citation accuracy (continuous, all cited docs) ────
-        # For each cited fragment, check ALL cited docs (not just the first),
-        # store continuous entailment float, max-pool across cited docs per fragment.
-        citation_cache_path = f"{cache_dir}/citation_continuous_cache_{cache_tag}.json"
+        # ── Stage 2b: Citation accuracy ────
+        citation_cache_path = f"{cache_dir}/citation_deberta_cache_{cache_tag}.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
-        cite_pair_index: List[Tuple[Tuple[str, str], int, int]] = []
+        cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
 
-        # Track which fragments have citations and how many cited docs each has
-        frag_cite_counts: Dict[Tuple[Tuple[str, str], int], int] = {}
+        citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
 
         for response in responses:
             if not response.responses:
                 continue
             key = (response.metadata.run_id, response.metadata.topic_id)
             docs = response.documents or {}
+
+            supported = 0
+            total_cited = 0
 
             for frag_idx, fragment in enumerate(response.responses):
                 cited_ids = []
@@ -622,56 +621,43 @@ class MinnaLeaderboardJudge:
                 if not cited_ids:
                     continue
 
+                total_cited += 1
+                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+
+                if cache_key in citation_cache:
+                    if citation_cache[cache_key] == 1:
+                        supported += 1
+                    continue
+
                 frag_text = fragment.text
-                cite_doc_count = 0
-
-                # Check ALL cited docs, not just the first
-                for cite_doc_idx, cid in enumerate(cited_ids):
-                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}_{cite_doc_idx}"
-                    if cache_key not in citation_cache and cid in docs:
-                        cite_pairs.append((docs[cid].text, frag_text))
-                        cite_pair_index.append((key, frag_idx, cite_doc_idx))
+                for cid in cited_ids:
                     if cid in docs:
-                        cite_doc_count += 1
+                        cite_pairs.append((docs[cid].text, frag_text))
+                        cite_pair_index.append((key, frag_idx))
+                        break
 
-                if cite_doc_count > 0:
-                    frag_cite_counts[(key, frag_idx)] = cite_doc_count
+            citation_info[key] = (supported, total_cited)
 
-        # Run deberta NLI on all citation pairs
+        # Run deberta NLI 
         if cite_pairs:
-            print(f"Citation NLI (deberta, continuous): {len(cite_pairs)} pairs", flush=True)
+            print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
                 chunk_scores = citation_nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
                 print(f"  Citation NLI (deberta): {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
                 for j, score in enumerate(chunk_scores):
                     idx = i + j
-                    key, frag_idx, cite_doc_idx = cite_pair_index[idx]
-                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}_{cite_doc_idx}"
-                    citation_cache[cache_key] = float(score[1])
+                    key, frag_idx = cite_pair_index[idx]
+                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+                    # entailment must be largest
+                    is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
+                    citation_cache[cache_key] = is_supported
+                    if is_supported:
+                        prev_sup, prev_total = citation_info[key]
+                        citation_info[key] = (prev_sup + 1, prev_total)
 
         save_cache(citation_cache, citation_cache_path)
 
-        # Aggregate: per fragment → max entailment across all cited docs.
-        # Per response → mean of per-fragment max scores.
-        citation_scores: Dict[Tuple[str, str], float] = {}
-        # Group fragments by response key
-        response_frags: Dict[Tuple[str, str], List[int]] = {}
-        for (key, frag_idx), doc_count in frag_cite_counts.items():
-            response_frags.setdefault(key, []).append(frag_idx)
-
-        for key, frag_indices in response_frags.items():
-            frag_maxes = []
-            for frag_idx in frag_indices:
-                doc_count = frag_cite_counts[(key, frag_idx)]
-                doc_scores = []
-                for cite_doc_idx in range(doc_count):
-                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}_{cite_doc_idx}"
-                    if cache_key in citation_cache:
-                        doc_scores.append(float(citation_cache[cache_key]))
-                if doc_scores:
-                    frag_maxes.append(max(doc_scores))
-            citation_scores[key] = sum(frag_maxes) / len(frag_maxes) if frag_maxes else 0.0
-
+        
         # ── Build leaderboard───────────────────────────
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
@@ -684,7 +670,8 @@ class MinnaLeaderboardJudge:
             else:
                 attribution = 0.0
 
-            cite_acc = citation_scores.get(key, 0.0)
+            cite_sup, cite_total = citation_info.get(key, (0, 0))
+            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
 
             ret_qual = retrieval_quality.get(key, 0.0)
             resp_nug = response_nugget_score.get(key, 0.0)
