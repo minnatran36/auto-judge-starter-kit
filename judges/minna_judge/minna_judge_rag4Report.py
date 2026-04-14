@@ -96,6 +96,9 @@ _doc_store_cache: Dict[str, Dict[str, str]] = {}
 def _load_doc_store(task: str) -> Dict[str, str]:
     """
     Load and return the document corpus for a given task language.
+    Reads the JSONL file only once per task per process — subsequent calls
+    return the already-loaded dict from _doc_store_cache (RAM, instant).
+
     Args:
         task: value of metadata.task, e.g. "english", "arabic", etc.
 
@@ -149,9 +152,20 @@ def _inject_documents(responses: List[Report]) -> None:
 
     For each response:
       - If response.documents is already populated (anise-style): skip (no-op).
-      - If response.documents is empty/None (adventure-style): collect all
-        doc IDs cited across all fragments, look them up in the corpus store,
-        and inject _Doc stubs into response.documents.
+      - If response.documents is empty/None (adventure-style): load all doc IDs
+        from response.references (the authoritative list of ALL retrieved docs
+        for this response), look them up in the corpus store, and inject _Doc
+        stubs into response.documents.
+
+    WHY response.references and not citation keys:
+      response.references = all docs the RAG system retrieved (e.g. ["doc_A", "doc_B", "doc_C"])
+      fragment.citations  = subset of those actually cited in fragment text (e.g. {"doc_A": 18.0})
+      Using references ensures we load ALL retrieved docs, not just cited ones.
+      This matters for:
+        - Attribution NLI: scores claim × ALL docs to find max support — missing
+          a retrieved doc means attribution score is underestimated.
+        - Retrieval quality: LLM judges whether retrieved docs answer the question —
+          showing fewer docs than were actually retrieved gives an unfair picture.
 
     This must be called once after responses = list(rag_responses) and before
     any scoring stage that accesses response.documents.
@@ -169,20 +183,26 @@ def _inject_documents(responses: List[Report]) -> None:
         if not store:
             continue
 
-        # Collect all doc IDs cited in this response's fragments.
-        # Citations are dicts {doc_id: retrieval_score} in adventure format.
-        # We only need the keys (doc IDs) — the float score is the BM25/retrieval
-        # ranking score from the RAG system, not used in our NLI scoring.
-        cited_ids = list({
-            cid
-            for frag in (response.responses or [])
-            for cid in (frag.citations or {}).keys()
-        })
+        # FIX: use response.references (all retrieved doc IDs, parsed by the
+        # framework from the "references" field in the JSONL) instead of
+        # collecting IDs from citation keys (which is only a subset — docs
+        # that were actually cited in fragment text).
+        doc_ids = response.references or []
+
+        # Fallback: if references is somehow empty, collect from citation keys.
+        # This shouldn't happen for well-formed adventure-continue data but
+        # guards against edge cases.
+        if not doc_ids:
+            doc_ids = list({
+                cid
+                for frag in (response.responses or [])
+                for cid in (frag.citations or {}).keys()
+            })
 
         # Build documents dict: {doc_id -> _Doc(text)}
         # Log any IDs not found in the corpus (shouldn't happen but good to know)
         docs = {}
-        for doc_id in cited_ids:
+        for doc_id in doc_ids:
             if doc_id in store:
                 docs[doc_id] = _Doc(store[doc_id])
             else:
@@ -193,12 +213,12 @@ def _inject_documents(responses: List[Report]) -> None:
 
     print(f"_inject_documents: injected documents for {injected_count} responses")
     if missing_ids:
-        print(f"  WARNING: {len(missing_ids)} cited doc IDs not found in corpus: "
+        print(f"  WARNING: {len(missing_ids)} doc IDs from references not found in corpus: "
               f"{missing_ids[:5]}{'...' if len(missing_ids) > 5 else ''}")
 
 
 # =============================================================================
-# NLI Models 
+# NLI Models (unchanged from original)
 # =============================================================================
 
 class _VectaraHHEM:
@@ -236,11 +256,11 @@ print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
 
 
 # FINAL = 0.5*(max(cite, attr) + ret)
+# RESPONSE_NUGGET_SCORE removed — computed by qrels stage but not used in FINAL
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("ATTRIBUTION_SCORE"),
     MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
-    MeasureSpec("RESPONSE_NUGGET_SCORE"),
     MeasureSpec("FINAL"),
 ))
 
@@ -262,7 +282,7 @@ MINIMAL_QRELS_SPEC = QrelsSpec[GradeRecord](
 
 
 # =============================================================================
-# MinnaNuggetCreator 
+# MinnaNuggetCreator (unchanged from original — does not use response.documents)
 # =============================================================================
 
 class MinnaNuggetCreator:
@@ -366,9 +386,14 @@ class MinnaNuggetCreator:
 
 # =============================================================================
 # MinnaQrelsCreator
+# FIX: Updated CACHE_DIR and CACHE_TAG to "output-rag4report" / "rag4report"
+#      so this run's cache files don't collide with the old kiddie run's files
+#      (which used "output-kiddie" / "mission3"). Reading/writing to the same
+#      cache files as a different dataset would silently return wrong grades.
 # =============================================================================
 
 class MinnaQrelsCreator:
+    # FIX: changed from "output-kiddie" / "mission3" to isolate from kiddie run
     CACHE_DIR = "output-rag4report"
     CACHE_TAG = "rag4report"
     CACHE_PATH = f"{CACHE_DIR}/qrels_grades_cache_{CACHE_TAG}.json"
@@ -484,7 +509,7 @@ class MinnaQrelsCreator:
 
 
 # =============================================================================
-# Cache helpers 
+# Cache helpers (unchanged)
 # =============================================================================
 
 def load_cache(path):
@@ -497,6 +522,15 @@ def save_cache(data, path):
     with open(path, "w") as f:
         json.dump(data, f)
 
+
+# =============================================================================
+# MinnaLeaderboardJudge
+# FIX 1: Updated cache_dir / cache_tag to "output-rag4report" / "rag4report"
+#         same reason as MinnaQrelsCreator above — cache isolation.
+# FIX 2: Added _inject_documents(responses) call after responses = list(...)
+#         This is the core fix — populates response.documents from the external
+#         corpus before any stage that needs doc text runs.
+# =============================================================================
 
 class MinnaLeaderboardJudge:
 
@@ -511,6 +545,9 @@ class MinnaLeaderboardJudge:
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
 
+        # FIX: changed from "output-kiddie" / "mission3" to avoid cache collision
+        # with the old kiddie run. All cache files for this run will live under
+        # output-rag4report/ and use "rag4report" as the tag in filenames.
         cache_dir = "output-rag4report"
         cache_tag = "rag4report"
 
@@ -523,8 +560,11 @@ class MinnaLeaderboardJudge:
 
         # FIX: inject document text into response.documents for adventure-style
         # runs (rag4reports-2026 format) where documents are not embedded in the
-        # Report object.
-       
+        # Report object. For anise-style runs this is a no-op.
+        # Must be called here, before any stage that accesses response.documents:
+        #   - retrieval quality (builds combined_docs from response.documents)
+        #   - attribution NLI (scores claim × doc pairs)
+        #   - citation accuracy (checks if cited doc entails fragment text)
         _inject_documents(responses)
 
         retrieval_cache_path = f"{cache_dir}/retrieval_quality_cache_{cache_tag}.json"
@@ -622,29 +662,6 @@ class MinnaLeaderboardJudge:
 
         print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
 
-    
-        qrels_grades_cache_path = MinnaQrelsCreator.CACHE_PATH
-        qrels_grades_cache = load_cache(qrels_grades_cache_path)
-        response_nugget_score: Dict[Tuple[str, str], float] = {}
-
-        if nugget_banks:
-            for response in responses:
-                topic_id = response.metadata.topic_id
-                run_id = response.metadata.run_id
-                if topic_id not in nugget_banks.banks:
-                    continue
-                nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
-                if not nuggets:
-                    continue
-                tallies = [
-                    qrels_grades_cache.get(f"{run_id}_{topic_id}_{n.question_id}", 0)
-                    for n in nuggets
-                ]
-                # 0-5 per nugget → normalize to [0, 1]
-                response_nugget_score[(run_id, topic_id)] = sum(tallies) / (len(tallies) * 5.0)
-
-        print(f"ResponseNugget: Scored {len(response_nugget_score)} (run, topic) pairs "
-              f"from {len(qrels_grades_cache)} cached grades")
 
         # ──────────────── Claims extraction ────────────────
         claims_cache_path = f"{cache_dir}/claims_cache_{cache_tag}.json"
@@ -824,7 +841,6 @@ class MinnaLeaderboardJudge:
             cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
 
             ret_qual = retrieval_quality.get(key, 0.0)
-            resp_nug = response_nugget_score.get(key, 0.0)
 
             final = 0.5 * (max(cite_acc, attribution) + ret_qual)
 
@@ -835,7 +851,6 @@ class MinnaLeaderboardJudge:
                     "ATTRIBUTION_SCORE": attribution,
                     "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
-                    "RESPONSE_NUGGET_SCORE": resp_nug,
                     "FINAL": final,
                 },
             )
@@ -851,7 +866,7 @@ class MinnaLeaderboardJudge:
 
 
 # =============================================================================
-# CLI Entry Point 
+# CLI Entry Point (unchanged)
 # =============================================================================
 
 if __name__ == "__main__":

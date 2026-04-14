@@ -196,15 +196,53 @@ but if a system worth its salt, both need to rank/correlate well with ground tru
 
 3. consider outliers?
 
-
-
 ------------------------------------------------
-If two ground truth measures rank responses differently from each other, then no single eval measure can have kendall = 1 against both simultaneously. This is just an algebraic fact: a single ranking can match at most one target ranking exactly.
+DISCRIMINATIVE
+1. Per topic: pick best/worst by RETRIEVAL_QUALITY
+2. LLM prompt: "Here are docs from a good retrieval and a bad 
+   retrieval for this question. What 5 specific facts or details
+   are present in the good docs but missing from the bad?"
+3. Output: list of discriminative nuggets per topic
+4. For each response: score each claim against each disc. nugget
+   using ms-marco cross-encoder (GPU, no LLM)
+5. Per response: disc_score = mean(max over claims per nugget)
+6. Add DISCRIMINATIVE_SCORE to leaderboard
 
-The best a single judge can do against multiple truth measures is land somewhere on the Pareto frontier — the set of points where you can't improve correlation with one truth measure without sacrificing correlation with another.
+use ms-marco-MiniLM-L-6-v2, lower than best scorebut use HHEM
+0.5*(max(cite,attr) + ret)"
+FINAL2 = FINAL + 0.02*disc"
 
-A judge that has kendall = 1 against every truth measure can only exist if all truth measures are themselves perfectly correlated with each other. In your data, they're not. So that judge cannot exist.
+Truth Measure	    FINAL	FINAL2 (0.02)	
+f1	                0.703	0.706	
+nugget_coverage	    0.702	0.707	
+correct_nuggets	    0.672	0.677	
+citation_support	0.251	0.254
+
+🍓 what makes using HHME better than MiniLM-L?
+
+🍓 could it be said that nugget = measure relations btw doc/response against topic? 
+citation = measure btw doc & response?
+
+🍓 improve citation performance, check if the text in documents 
+in each repgen part of or the the whole as in eng-doc.json
+
+Doc d0d53bd7-..._296881079 in yam: "The 'Godfather of AI' warns about potential dangers..." (3463 chars)
+Same doc in eng-docs.jsonl: identical, 3463 chars, same URL
 
 
 
+--------------------------
+PYTHONUNBUFFERED=1 nohup auto-judge run --workflow judges/minna_judge/workflow.yml \
+  --rag-responses data/rag/runs/repgen/ \
+  --rag-topics data/rag/topics/ragtime25_main_all.jsonl \
+  --out-dir ./output-kiddie/ > output-kiddie/judge_run.log 2>&1 &
 
+
+
+mkdir -p output-rag4report
+
+PYTHONUNBUFFERED=1 nohup auto-judge run \
+  --workflow judges/minna_judge/workflow_rag4Report.yml \
+  --rag-responses rag4Report/rag4reports-2026/data/generated-reports/adventure-continue \
+  --rag-topics rag4Report/rag4reports-2026/data/report-requests.jsonl \
+  --out-dir ./output-rag4report/ > output-rag4report/judge_run.log 2>&1 &

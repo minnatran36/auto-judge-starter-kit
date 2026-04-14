@@ -9,3 +9,11 @@ huggingface-cli download trec-ragtime/ragtime1 --repo-type dataset \
 # download just the English split (~1.6GB)
 huggingface-cli download trec-ragtime/ragtime1 --repo-type dataset \
     --include "*eng*" --local-dir ~/ragtime1
+
+PYTHONUNBUFFERED=1 nohup auto-judge run \
+  --workflow judges/minna_judge/workflow_rag4Report.yml \
+  --rag-responses /home/nt1112/auto-judge-starter-kit/rag4Report/rag4reports-2026/data/generated-reports/ \
+  --rag-topics /home/nt1112/auto-judge-starter-kit/rag4Report/rag4reports-2026/data/report-requests.jsonl \
+  --out-dir ./output-rag4report/ > output-rag4report/judge_run.log 2>&1 &
+
+  tail -f output-rag4report/judge_run.log
