@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-# RUN8
+# SUBMISSION 2
 
 import warnings
 import logging
-warnings.filterwarnings("ignore", message="Be aware, overflowing tokens")
-warnings.filterwarnings("ignore", message="You are using the default legacy behaviour")
-logging.getLogger("transformers").setLevel(logging.ERROR)
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type
 import asyncio
 import json
 import dataclasses
 import os
-import hashlib
 from autojudge_base import (
     LlmConfigProtocol,
     Report,
@@ -32,65 +28,15 @@ from autojudge_base.nugget_data import (
     NuggetBank,
     NuggetQuestion,
 )
-from autojudge_base.document.document import Document
-from minima_llm import MinimaLlmConfig, MinimaLlmRequest, MinimaLlmResponse, OpenAIMinimaLlm
+from minima_llm import MinimaLlmConfig, MinimaLlmRequest, OpenAIMinimaLlm
 from transformers import AutoModelForSequenceClassification, T5Tokenizer
+from sentence_transformers import CrossEncoder
 import torch
 
 
-# =============================================================================
-# Ragtime1 corpus loader (for rag4reports format)
-# =============================================================================
-# rag4reports system files don't ship doc text inline — only doc IDs in
-# `references` and `responses[*].citations`. The full doc text lives in the
-# trec-ragtime/ragtime1 HF dataset, split across 4 language files.
-# Loon-style files already have `documents` populated, so the backfill below
-# is a no-op for them.
-
-CORPUS_PATHS = [
-    os.path.expanduser(f"~/ragtime1/{lang}-docs.jsonl")
-    for lang in ("eng", "rus", "arb", "zho")
-]
-CORPUS_CACHE_PATH = os.path.expanduser("~/ragtime1/.rag4reports_corpus_cache.json")
-
-
-def load_ragtime_corpus(needed_ids: set) -> dict:
-    """Stream all 4 ragtime1 splits, return {doc_id: text} for needed IDs only.
-    Caches the filtered dict to disk so subsequent runs are instant."""
-    existing = {}
-    if os.path.exists(CORPUS_CACHE_PATH):
-        with open(CORPUS_CACHE_PATH) as f:
-            existing = json.load(f)
-        if needed_ids <= set(existing.keys()):
-            print(f"load_ragtime_corpus: {len(needed_ids)} docs already in cache")
-            return {k: existing[k] for k in needed_ids}
-
-    remaining = set(needed_ids) - set(existing.keys())
-    print(f"load_ragtime_corpus: scanning corpus for {len(remaining)} new doc IDs...")
-    docs = dict(existing)
-    for path in CORPUS_PATHS:
-        if not remaining:
-            break
-        if not os.path.exists(path):
-            print(f"  WARN: {path} not found, skipping")
-            continue
-        with open(path) as f:
-            for line in f:
-                d = json.loads(line)
-                if d["id"] in remaining:
-                    docs[d["id"]] = d["text"]
-                    remaining.discard(d["id"])
-                    if not remaining:
-                        break
-        print(f"  after {os.path.basename(path)}: {len(needed_ids) - len(remaining)}/{len(needed_ids)} found")
-
-    with open(CORPUS_CACHE_PATH, "w") as f:
-        json.dump(docs, f)
-    print(f"  cached {len(docs)} docs total ({len(remaining)} still missing)")
-    return {k: docs[k] for k in needed_ids if k in docs}
-
-
 class _VectaraHHEM:
+    """Wrapper around HHEMv2 with .predict() matching CrossEncoder interface."""
+
     def __init__(self):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
@@ -104,9 +50,7 @@ class _VectaraHHEM:
         scores = []
         for i in range(0, len(sentence_pairs), batch_size):
             batch = sentence_pairs[i:i + batch_size]
-            # FIX: max_length=512 prevents tokenizer from processing full doc texts
-            # before truncating — this was causing millions of "overflowing tokens"
-            # warnings and wasting CPU time on text that gets thrown away
+            
             inputs = self._tokenizer(
                 [p[0] for p in batch], [p[1] for p in batch],
                 return_tensors="pt", padding=True, truncation=True,
@@ -120,10 +64,18 @@ class _VectaraHHEM:
 
 nli_model = _VectaraHHEM()
 
+# deberta NLI for citation accuracy (run4 approach: strict 3-class entailment)
+citation_nli_model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
+print("citation_nli_model: loaded cross-encoder/nli-deberta-v3-base")
+
+
+# FINAL = 0.5*(max(cite, attr) + ret)
 MINIMAL_SPEC = LeaderboardSpec(measures=(
     MeasureSpec("ATTRIBUTION_SCORE"),
+    MeasureSpec("CITATION_ACCURACY"),
     MeasureSpec("RETRIEVAL_QUALITY"),
-    MeasureSpec("FINAL_SCORE"),
+    MeasureSpec("RESPONSE_NUGGET_SCORE"),
+    MeasureSpec("FINAL"),
 ))
 
 
@@ -167,7 +119,7 @@ class MinnaNuggetCreator:
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
 
-        # fix2-6: collect diverse response samples to inform nugget generation
+        # fix2-6: collect diverse response samples to inform nugget generation -- not very effective
         responses = list(rag_responses)
         response_samples: Dict[str, List[str]] = {}
         for resp in responses:
@@ -187,8 +139,7 @@ class MinnaNuggetCreator:
             else:
                 context = topic.problem_statement
 
-            # include response samples in nugget prompt so nuggets
-            # better discriminate between good and bad responses
+            # include response samples in nugget prompt -- not very effective
             samples = response_samples.get(topic.request_id, [])
             if samples:
                 sample_text = "\n---\n".join(samples)
@@ -255,6 +206,10 @@ class MinnaNuggetCreator:
 # =============================================================================
 
 class MinnaQrelsCreator:
+    CACHE_DIR = "output-kiddie"
+    CACHE_TAG = "mission3"
+    CACHE_PATH = f"{CACHE_DIR}/qrels_grades_cache_{CACHE_TAG}.json"
+
     def create_qrels(
         self,
         rag_responses: Iterable[Report],
@@ -262,20 +217,24 @@ class MinnaQrelsCreator:
         llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
         grade_range: Tuple[int, int] = (0, 3),
-        length_threshold: int = 100,
         **kwargs: Any,
     ) -> Optional[Qrels]:
 
+        os.makedirs(self.CACHE_DIR, exist_ok=True)
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
 
+        cache = load_cache(self.CACHE_PATH)
+
         responses = list(rag_responses)
         grade_records: List[GradeRecord] = []
-        requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
+        requests_info: List[Tuple[str, str, str, MinimaLlmRequest]] = []
 
+        # Build LLM requests only for cache misses.
         for response in responses:
             topic_id = response.metadata.topic_id
+            run_id = response.metadata.run_id
             text = response.get_report_text()
 
             if topic_id not in nugget_banks.banks:
@@ -284,19 +243,23 @@ class MinnaQrelsCreator:
             nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
 
             for nugget in nuggets:
+                cache_key = f"{run_id}_{topic_id}_{nugget.question_id}"
+                if cache_key in cache:
+                    continue
                 requests_info.append((
-                    response.metadata.run_id,
-                    topic_id,
+                    run_id, topic_id, nugget.question_id,
                     MinimaLlmRequest(
-                        # ask LLM to grade 0/1/2 instead of binary 0/1
-                        request_id=f"{response.metadata.run_id}_{topic_id}_{nugget.question_id}",
+                        request_id=cache_key,
                         messages=[
                             {"role": "system", "content": (
                                 "How well does this response answer this question? "
-                                "Reply with a single number:\n"
-                                "  2 = fully answers the question\n"
-                                "  1 = partially answers the question\n"
-                                "  0 = does not answer the question"
+                                "Reply with a single number from 0 to 5:\n"
+                                "  5 = fully answers with specific evidence and details\n"
+                                "  4 = fully answers in general terms\n"
+                                "  3 = partially answers most of the question\n"
+                                "  2 = partially answers some of the question\n"
+                                "  1 = barely addresses the question\n"
+                                "  0 = does not address the question"
                             )},
                             {"role": "user", "content": f"Question: {nugget.question}\n\nResponse: {text}"},
                         ],
@@ -304,24 +267,44 @@ class MinnaQrelsCreator:
                     )
                 ))
 
-        results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
-        scores = {}
+        if requests_info:
+            print(f"MinnaQrelsCreator: Sending {len(requests_info)} LLM grading requests "
+                  f"({len(cache)} already cached)...")
+            # Process in chunks so progress is saved if crashes.
+            BATCH_SIZE = 5000
+            for batch_start in range(0, len(requests_info), BATCH_SIZE):
+                batch = requests_info[batch_start:batch_start + BATCH_SIZE]
+                try:
+                    results = asyncio.run(backend.run_batched([req for _, _, _, req in batch]))
+                    for (run_id, topic_id, nug_id, _), result in zip(batch, results):
+                        cache_key = f"{run_id}_{topic_id}_{nug_id}"
+                        cache[cache_key] = self._parse_graded(result)
+                except Exception as e:
+                    print(f"WARNING: Batch {batch_start}-{batch_start + len(batch)} failed: {e}")
+                    print(f"  Saving {len(cache)} cached grades before re-raising...")
+                    save_cache(cache, self.CACHE_PATH)
+                    raise
+                save_cache(cache, self.CACHE_PATH)
+                print(f"  Qrels progress: {min(batch_start + BATCH_SIZE, len(requests_info))}/{len(requests_info)} "
+                      f"submitted, {len(cache)} total cached")
 
-        for (run_id, topic_id, _), result in zip(requests_info, results):
-            score = self._parse_graded(result)
-            scores.setdefault((run_id, topic_id), []).append(score)
-
+    
         max_grade = grade_range[1]
         for response in responses:
-            key = (response.metadata.run_id, response.metadata.topic_id)
-            text = response.get_report_text()
             topic_id = response.metadata.topic_id
-            if key not in scores:
+            run_id = response.metadata.run_id
+            text = response.get_report_text()
+            if topic_id not in nugget_banks.banks:
                 continue
-
-            tallies = scores[key]
-            # each nugget scored 0-2, 1/2 to normalize to 1
-            avg = sum(tallies) / (len(tallies) * 2.0)  
+            nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+            if not nuggets:
+                continue
+            tallies = [
+                cache.get(f"{run_id}_{topic_id}_{n.question_id}", 0)
+                for n in nuggets
+            ]
+            # each nugget scored 0-5; normalize to [0,1]
+            avg = sum(tallies) / (len(tallies) * 5.0)
             grade = round(max_grade * avg)
             grade_records.append(GradeRecord(topic_id, text, grade))
 
@@ -330,21 +313,12 @@ class MinnaQrelsCreator:
         return qrels
 
     def _parse_graded(self, result) -> int:
-        """Parse 0/1/2 graded response from LLM."""
+        """Parse 0-5 graded response from LLM."""
         try:
             text = result.text.strip()
             for char in text:
-                if char in ("0", "1", "2"):
+                if char in ("0", "1", "2", "3", "4", "5"):
                     return int(char)
-            return 0
-        except:
-            return 0
-
-    def _parse_binary(self, result) -> int:
-        try:
-            text = result.text.strip().lower()
-            if text.startswith("1") or text.startswith("yes"):
-                return 1
             return 0
         except:
             return 0
@@ -377,51 +351,25 @@ class MinnaLeaderboardJudge:
         rag_topics: Sequence[Request],
         llm_config: LlmConfigProtocol,
         nugget_banks: Optional[NuggetBanksProtocol] = None,
-        qrels: Optional[Qrels] = None,
-        keyword_bonus: float = 0.2,
         on_missing_evals: str = "fix_aggregate",
         **kwargs: Any,
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
-        filebase = kwargs.get("filebase", "output-rag4report/minna_judge")
+
+        # RESPONSE_NUGGET_SCORE. Shares qrels-stage cache 
+      
+        cache_dir = "output-kiddie"
+        cache_tag = "mission3"
+        os.makedirs(cache_dir, exist_ok=True)
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
         responses = list(rag_responses)
 
-        # ── Backfill response.documents for rag4reports format ──────────────
-        # rag4reports system files only contain doc IDs (no inline text), so
-        # autojudge-base loads them with `documents = None`. Without docs, both
-        # the attribution and retrieval-quality branches below skip everything
-        # and every score is 0. Loon-style files already have documents
-        # populated, so this loop is a no-op for them.
-        needs_backfill = [r for r in responses if not r.documents and r.references]
-        if needs_backfill:
-            needed_ids = set()
-            for r in needs_backfill:
-                needed_ids.update(r.references)
-            id_to_text = load_ragtime_corpus(needed_ids)
-            backfilled = 0
-            for r in needs_backfill:
-                r.documents = {
-                    doc_id: Document(id=doc_id, text=id_to_text[doc_id])
-                    for doc_id in r.references
-                    if doc_id in id_to_text
-                }
-                if r.documents:
-                    backfilled += 1
-            print(f"Backfilled documents on {backfilled}/{len(needs_backfill)} responses")
-
-        qrels_dict: Dict[Tuple[str, str], int] = {}
-        if qrels:
-            for row in qrels.rows:
-                qrels_dict[(row.topic_id, row.doc_id)] = row.grade
-
-        
-        retrieval_cache_path = f"{filebase}.retrieval_quality_cache.json"
+        retrieval_cache_path = f"{cache_dir}/retrieval_quality_cache_{cache_tag}.json"
         retrieval_cache = load_cache(retrieval_cache_path)
-        # Each request checks one (system, topic, nugget) triple
+        # Each request checks (system, topic, nugget) 
         retrieval_requests: List[Tuple[str, str, str, MinimaLlmRequest]] = []
 
         retrieval_quality: Dict[Tuple[str, str], float] = {}
@@ -437,9 +385,8 @@ class MinnaLeaderboardJudge:
 
                 nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
 
-                # Build a single "retrieval context" string from this system's
-                # docs for this topic. We truncate each doc to 1000 chars and
-                # cap at 20 docs to stay within LLM context limits.
+                # Build a single "retrieval context",
+                # truncate each doc to 1000 chars & cap at 20 docs 
                 doc_texts = []
                 for doc_id, doc in response.documents.items():
                     doc_texts.append(doc.text[:1000])
@@ -450,8 +397,7 @@ class MinnaLeaderboardJudge:
                     if cache_key in retrieval_cache:
                         continue
 
-                    # Ask the LLM: do these docs answer this sub-question?
-                    # Graded 0/1/2 for consistency with the qrels grading scheme
+               
                     retrieval_requests.append((
                         run_id, topic_id, nugget.question_id,
                         MinimaLlmRequest(
@@ -475,25 +421,34 @@ class MinnaLeaderboardJudge:
 
             if retrieval_requests:
                 print(f"RetrievalQuality: Sending {len(retrieval_requests)} LLM requests...")
-                ret_results = asyncio.run(backend.run_batched(
-                    [req for _, _, _, req in retrieval_requests]
-                ))
-                for (run_id, topic_id, nug_id, _), result in zip(retrieval_requests, ret_results):
-                    cache_key = f"{run_id}_{topic_id}_{nug_id}"
-                    # Parse graded 0/1/2 response (same logic as qrels grading)
+                BATCH_SIZE = 5000
+                for batch_start in range(0, len(retrieval_requests), BATCH_SIZE):
+                    batch = retrieval_requests[batch_start:batch_start + BATCH_SIZE]
                     try:
-                        text = result.text.strip()
-                        score = 0
-                        for char in text:
-                            if char in ("0", "1", "2"):
-                                score = int(char)
-                                break
-                    except:
-                        score = 0
-                    retrieval_cache[cache_key] = score
-                save_cache(retrieval_cache, retrieval_cache_path)
+                        ret_results = asyncio.run(backend.run_batched(
+                            [req for _, _, _, req in batch]
+                        ))
+                        for (run_id, topic_id, nug_id, _), result in zip(batch, ret_results):
+                            cache_key = f"{run_id}_{topic_id}_{nug_id}"
+                            try:
+                                text = result.text.strip()
+                                score = 0
+                                for char in text:
+                                    if char in ("0", "1", "2"):
+                                        score = int(char)
+                                        break
+                            except:
+                                score = 0
+                            retrieval_cache[cache_key] = score
+                    except Exception as e:
+                        print(f"WARNING: Retrieval batch {batch_start}-{batch_start + len(batch)} failed: {e}")
+                        print(f"  Saving {len(retrieval_cache)} cached scores before re-raising...")
+                        save_cache(retrieval_cache, retrieval_cache_path)
+                        raise
+                    save_cache(retrieval_cache, retrieval_cache_path)
+                    print(f"  RetrievalQuality progress: {min(batch_start + BATCH_SIZE, len(retrieval_requests))}/{len(retrieval_requests)} "
+                          f"submitted, {len(retrieval_cache)} total cached")
 
-            # Aggregate: for each (run, topic), average the per-nugget scores
             # and normalize to 0-1 (max per nugget is 2)
             for response in responses:
                 topic_id = response.metadata.topic_id
@@ -511,8 +466,32 @@ class MinnaLeaderboardJudge:
 
         print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
 
-        # ── Stage 1: Claims extraction ────────────────
-        claims_cache_path = f"{filebase}.claims_newcache.json"
+    
+        qrels_grades_cache_path = MinnaQrelsCreator.CACHE_PATH
+        qrels_grades_cache = load_cache(qrels_grades_cache_path)
+        response_nugget_score: Dict[Tuple[str, str], float] = {}
+
+        if nugget_banks:
+            for response in responses:
+                topic_id = response.metadata.topic_id
+                run_id = response.metadata.run_id
+                if topic_id not in nugget_banks.banks:
+                    continue
+                nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
+                if not nuggets:
+                    continue
+                tallies = [
+                    qrels_grades_cache.get(f"{run_id}_{topic_id}_{n.question_id}", 0)
+                    for n in nuggets
+                ]
+                # 0-5 per nugget → normalize to [0, 1]
+                response_nugget_score[(run_id, topic_id)] = sum(tallies) / (len(tallies) * 5.0)
+
+        print(f"ResponseNugget: Scored {len(response_nugget_score)} (run, topic) pairs "
+              f"from {len(qrels_grades_cache)} cached grades")
+
+        # ──────────────── Claims extraction ────────────────
+        claims_cache_path = f"{cache_dir}/claims_cache_{cache_tag}.json"
         claims_cache = load_cache(claims_cache_path)
         requests_info: List[Tuple[str, str, MinimaLlmRequest]] = []
 
@@ -542,29 +521,37 @@ class MinnaLeaderboardJudge:
                 )
             ))
 
-        results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
-
         claims: Dict[Tuple[str, str], List[str]] = {}
         for key, value in claims_cache.items():
             r_id, t_id = key.split("_", 1)
             claims[(r_id, t_id)] = value
 
-        for (run_id, topic_id, _), result in zip(requests_info, results):
-            key = f"{run_id}_{topic_id}"
+        if requests_info:
+            print(f"Claims extraction: Sending {len(requests_info)} LLM requests "
+                  f"({len(claims_cache)} already cached)...")
             try:
-                parsed = json.loads(result.text)
-            except (json.JSONDecodeError, AttributeError):
-                parsed = []
-            parsed = [c for c in parsed if isinstance(c, str) and len(c.strip()) >= 10]
-            claims[(run_id, topic_id)] = parsed
-            claims_cache[key] = parsed
+                results = asyncio.run(backend.run_batched([req for _, _, req in requests_info]))
+                for (run_id, topic_id, _), result in zip(requests_info, results):
+                    key = f"{run_id}_{topic_id}"
+                    try:
+                        parsed = json.loads(result.text)
+                    except (json.JSONDecodeError, AttributeError):
+                        parsed = []
+                    parsed = [c for c in parsed if isinstance(c, str) and len(c.strip()) >= 10]
+                    claims[(run_id, topic_id)] = parsed
+                    claims_cache[key] = parsed
+            except Exception as e:
+                print(f"WARNING: Claims batch failed: {e}")
+                print(f"  Saving {len(claims_cache)} cached claims before re-raising...")
+                save_cache(claims_cache, claims_cache_path)
+                raise
+            save_cache(claims_cache, claims_cache_path)
 
-        save_cache(claims_cache, claims_cache_path)
-
-        # ── Stage 2a: Attribution score (claim × all docs) ───
-        nli_scores_cache_path = f"{filebase}.nli_scores_newcache.json"
+        # ── Stage 2a: Attribution score (claim × all docs, continuous max-pool) ──
+        # get max (claim, doc)
+        nli_scores_cache_path = f"{cache_dir}/nli_scores_continuous_{cache_tag}.json"
         nli_scores_cache = load_cache(nli_scores_cache_path)
-        score_dict: Dict[Tuple[Tuple[str, str], str], int] = {}
+        score_dict: Dict[Tuple[Tuple[str, str], str], float] = {}
 
         pairs: List[Tuple[str, str]] = []
         pair_index: List[Tuple[Tuple[str, str], str, str]] = []
@@ -574,20 +561,16 @@ class MinnaLeaderboardJudge:
                 continue
             key = (response.metadata.run_id, response.metadata.topic_id)
             for claim in claims.get(key, []):
-                claim_supported = False
-                uncached_docs: List[Tuple[str, Any]] = []
+                cached_max = 0.0
+                # must check ALL docs to find max.
                 for doc_id, doc in response.documents.items():
                     key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
                     if key_str in nli_scores_cache:
-                        if nli_scores_cache[key_str] == 1:
-                            claim_supported = True
+                        cached_max = max(cached_max, float(nli_scores_cache[key_str]))
                     else:
-                        uncached_docs.append((doc_id, doc))
-                score_dict[(key, claim)] = 1 if claim_supported else 0
-                if not claim_supported:
-                    for doc_id, doc in uncached_docs:
                         pairs.append((doc.text, claim))
                         pair_index.append((key, doc_id, claim))
+                score_dict[(key, claim)] = cached_max
 
         CHUNK_SIZE = 500
         if pairs:
@@ -599,18 +582,83 @@ class MinnaLeaderboardJudge:
                     idx = i + j
                     key, doc_id, claim = pair_index[idx]
                     key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
-                    # HHEM outputs single float (0-1), threshold at 0.5
-                    raw_nli = 1 if float(score) > 0.5 else 0
-                    nli_scores_cache[key_str] = raw_nli
-                    if raw_nli == 1:
-                        score_dict[(key, claim)] = 1
+                    float_score = float(score)
+                    nli_scores_cache[key_str] = float_score
+                    if float_score > score_dict.get((key, claim), 0.0):
+                        score_dict[(key, claim)] = float_score
                 # save cache every 10 chunks to avoid losing progress
                 if (i // CHUNK_SIZE) % 10 == 9:
                     save_cache(nli_scores_cache, nli_scores_cache_path)
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
-        # Build final leaderboard
+        # ── Stage 2b: Citation accuracy ────
+        citation_cache_path = f"{cache_dir}/citation_deberta_cache_{cache_tag}.json"
+        citation_cache = load_cache(citation_cache_path)
+
+        cite_pairs: List[Tuple[str, str]] = []
+        cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
+
+        citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
+
+        for response in responses:
+            if not response.responses:
+                continue
+            key = (response.metadata.run_id, response.metadata.topic_id)
+            docs = response.documents or {}
+
+            supported = 0
+            total_cited = 0
+
+            for frag_idx, fragment in enumerate(response.responses):
+                cited_ids = []
+                if fragment.citations:
+                    if isinstance(fragment.citations, dict):
+                        cited_ids = list(fragment.citations.keys())
+                    elif isinstance(fragment.citations, list):
+                        cited_ids = [str(c) for c in fragment.citations]
+
+                if not cited_ids:
+                    continue
+
+                total_cited += 1
+                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+
+                if cache_key in citation_cache:
+                    if citation_cache[cache_key] == 1:
+                        supported += 1
+                    continue
+
+                frag_text = fragment.text
+                for cid in cited_ids:
+                    if cid in docs:
+                        cite_pairs.append((docs[cid].text, frag_text))
+                        cite_pair_index.append((key, frag_idx))
+                        break
+
+            citation_info[key] = (supported, total_cited)
+
+        # Run deberta NLI 
+        if cite_pairs:
+            print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
+            for i in range(0, len(cite_pairs), CHUNK_SIZE):
+                chunk_scores = citation_nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
+                print(f"  Citation NLI (deberta): {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
+                for j, score in enumerate(chunk_scores):
+                    idx = i + j
+                    key, frag_idx = cite_pair_index[idx]
+                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+                    # entailment must be largest
+                    is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
+                    citation_cache[cache_key] = is_supported
+                    if is_supported:
+                        prev_sup, prev_total = citation_info[key]
+                        citation_info[key] = (prev_sup + 1, prev_total)
+
+        save_cache(citation_cache, citation_cache_path)
+
+        
+        # ── Build leaderboard───────────────────────────
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -618,20 +666,27 @@ class MinnaLeaderboardJudge:
 
             claim_list = claims.get(key, [])
             if claim_list:
-                attribution = sum(score_dict.get((key, c), 0) for c in claim_list) / len(claim_list)
+                attribution = sum(score_dict.get((key, c), 0.0) for c in claim_list) / len(claim_list)
             else:
-                attribution = 0
+                attribution = 0.0
+
+            cite_sup, cite_total = citation_info.get(key, (0, 0))
+            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
 
             ret_qual = retrieval_quality.get(key, 0.0)
-            final = 0.5 * (attribution + ret_qual)
+            resp_nug = response_nugget_score.get(key, 0.0)
+
+            final = 0.5 * (max(cite_acc, attribution) + ret_qual)
 
             builder.add(
                 run_id=response.metadata.run_id,
                 topic_id=topic_id,
                 values={
                     "ATTRIBUTION_SCORE": attribution,
+                    "CITATION_ACCURACY": cite_acc,
                     "RETRIEVAL_QUALITY": ret_qual,
-                    "FINAL_SCORE": final,
+                    "RESPONSE_NUGGET_SCORE": resp_nug,
+                    "FINAL": final,
                 },
             )
 
@@ -640,7 +695,7 @@ class MinnaLeaderboardJudge:
             on_missing=on_missing_evals,
         )
         print(f"MinnaLeaderboardJudge: Built leaderboard with {len(leaderboard.entries)} entries"
-              f" (FINAL=0.5*(attr+ret))")
+              f" (FINAL = 0.5*(max(cite,attr) + ret))")
 
         return leaderboard
 
