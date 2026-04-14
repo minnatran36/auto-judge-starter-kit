@@ -190,13 +190,17 @@ def _inject_documents(responses: List[Report]) -> None:
         doc_ids = response.references or []
 
         # Fallback: if references is somehow empty, collect from citation keys.
-        # This shouldn't happen for well-formed adventure-continue data but
-        # guards against edge cases.
+        # Must handle two citation formats:
+        #   RagtimeReportSentence: citations = {doc_id: score} -> use .keys()
+        #   Rag24ReportSentence:   citations = [index, ...]    -> skip (integers, not doc IDs)
         if not doc_ids:
             doc_ids = list({
                 cid
                 for frag in (response.responses or [])
-                for cid in (frag.citations or {}).keys()
+                for cid in (
+                    frag.citations.keys() if isinstance(frag.citations, dict)
+                    else []  # list citations are integer indices, not doc IDs
+                )
             })
 
         # Build documents dict: {doc_id -> _Doc(text)}
@@ -662,6 +666,7 @@ class MinnaLeaderboardJudge:
 
         print(f"RetrievalQuality: Scored {len(retrieval_quality)} (run, topic) pairs")
 
+        # RESPONSE_NUGGET_SCORE removed — not used in FINAL formula
 
         # ──────────────── Claims extraction ────────────────
         claims_cache_path = f"{cache_dir}/claims_cache_{cache_tag}.json"
