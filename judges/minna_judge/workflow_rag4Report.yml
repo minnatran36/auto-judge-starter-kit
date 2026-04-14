@@ -1,12 +1,10 @@
-# Dotted import paths to protocol implementations.
-# This allows running the judge via: auto-judge run --workflow workflow.yml
+# workflow_rag4Report.yml
+# For evaluating rag4reports-2026 systems (e.g. adventure-continue).
 #
-# Three protocols can be specified separately for modular composition:
-#   nugget_class: NuggetCreatorProtocol (creates nuggets)
-#   qrels_class:  QrelsCreatorProtocol (creates relevance judgments)
-#   judge_class:  LeaderboardJudgeProtocol (produces leaderboard)
-#
-# CompleteExampleJudge demonstrates the modular pattern with three separate classes:
+# FIX: class paths updated from minna_judge.minna_judge → minna_judge.minna_judge_rag4Report
+# The original workflow.yml pointed to the old file (written for anise/kiddie format).
+# minna_judge_rag4Report.py contains the document injection fix needed for
+# adventure-style runs where doc text is not embedded in the Report object.
 
 nugget_class: "judges.minna_judge.minna_judge_rag4Report:MinnaNuggetCreator"
 qrels_class:  "judges.minna_judge.minna_judge_rag4Report:MinnaQrelsCreator"
@@ -15,75 +13,59 @@ judge_class:  "judges.minna_judge.minna_judge_rag4Report:MinnaLeaderboardJudge"
 # =============================================================================
 # Lifecycle Flags
 # =============================================================================
-# Control which phases of the judge run and how data flows between them.
 
-create_nuggets: true              # Call create_nuggets() to generate nuggets
-create_qrels: true                # Call create_qrels() to generate relevance judgments
-judge: true                       # Call judge() to produce leaderboard
+create_nuggets: true
+create_qrels: false        # disabled — RESPONSE_NUGGET_SCORE removed from leaderboard
+judge: true
 
-# Data flow control
-# Nugget creator uses responses to collect diverse samples for context
 nugget_depends_on_responses: true
-judge_uses_nuggets: true          # Pass nuggets to judge()
-judge_uses_qrels: true            # Pass qrels to judge()
-qrels_uses_nuggets: true        # Pass nuggets to create_qrels()
+judge_uses_nuggets: true
+judge_uses_qrels: false    # disabled — qrels output no longer used in judge stage
+qrels_uses_nuggets: true
 
-# Force regeneration even if files exist/ false if cache
 force_recreate_nuggets: false
 force_recreate_qrels: false
 
-# Save modified Report.evaldata to file
 augment_report: false
 
 
 # =============================================================================
 # Default Settings
 # =============================================================================
-# Shared settings passed to all phases. Use {_name} for variant/sweep name.
 
 settings:
-  filebase: "minna_judge_rag4report"    # Output filename base
+  filebase: "minna_judge_rag4report"   # FIX: changed from "minna_judge_run_final"
+                                        # to clearly label output as rag4report run
 
 
 # =============================================================================
 # Phase-Specific Settings
 # =============================================================================
-# Settings for individual phases. These override shared settings.
 
 nugget_settings:
   max_nuggets: 10
 
 qrels_settings:
-  grade_range: [0, 3]             # Min and max relevance grades
-  length_threshold: 100           # Text length threshold for grading
+  grade_range: [0, 3]
+  length_threshold: 100
 
 judge_settings:
-  keyword_bonus: 0.2              # Score bonus for keyword matches
-  on_missing_evals: "fix_aggregate"  # How to handle missing evaluations
+  on_missing_evals: "fix_aggregate"
 
 
 # =============================================================================
 # Variants
 # =============================================================================
-# Named configurations that override default settings.
-# Run with: auto-judge run --workflow workflow.yml --variant <name>
 
 variants:
-  # Stricter grading with more nuggets
   strict:
     nugget_settings:
       max_nuggets: 5
-    judge_settings:
-      keyword_bonus: 0.1
 
-  # Lenient grading
   lenient:
     qrels_settings:
       length_threshold: 50
-    judge_settings:
-      keyword_bonus: 0.3
 
-  # No nuggets or qrels - judge only
   judge-only:
     create_nuggets: false
     create_qrels: false
@@ -94,19 +76,8 @@ variants:
 # =============================================================================
 # Parameter Sweeps
 # =============================================================================
-# Grid search over parameter combinations.
-# Run with: auto-judge run --workflow workflow.yml --sweep <name>
 
 sweeps:
-  # Sweep over keyword bonus values
-  keyword-sweep:
-    judge_settings:
-      keyword_bonus: [0.1, 0.2, 0.3, 0.4]       # 1.what's keyword_bonus?
-
-  # Full grid search: questions x bonus
   grid-search:
-    # FIX: was questions_per_topic (silently ignored); code reads max_nuggets
     nugget_settings:
       max_nuggets: [2, 3, 5]
-    judge_settings:
-      keyword_bonus: [0.1, 0.2, 0.3]
