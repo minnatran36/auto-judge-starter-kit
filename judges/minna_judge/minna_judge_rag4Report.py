@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# SUBMISSION 2
+# RAG4REPORT VERSION
+# Adapted from minna_judge.py (mission3/kiddie) for the rag4reports-2026 dataset.
+#
+# KEY DIFFERENCE FROM ORIGINAL:
+#   The original code (anise format) had document text embedded directly in each
+#   Report object under response.documents. The rag4reports-2026 format (adventure-
+#   continue style) does NOT embed document text — it only stores doc IDs in
+#   response.references and fragment.citations. The actual text lives in external
+#   corpus files (~/ragtime1/eng-docs.jsonl etc.).
+#
+#   Fix: _load_doc_store() + _inject_documents() below load the corpus into RAM
+#   once and populate response.documents before any scoring logic runs.
+#   This is a no-op for anise-style runs that already have documents populated,
+#   so the code stays compatible with both formats.
 
 import warnings
 import logging
@@ -34,6 +47,160 @@ from sentence_transformers import CrossEncoder
 import torch
 
 
+# =============================================================================
+# FIX: Document store for rag4report (adventure-style runs)
+# =============================================================================
+#
+# WHY THIS EXISTS:
+#   adventure-continue JSONL has no "documents" field. Each Report object handed
+#   to the judge will have response.documents = None or {}, so all attribution
+#   NLI and citation accuracy scoring would silently produce 0 for every run.
+#
+# HOW IT WORKS:
+#   1. _TASK_TO_CORPUS maps the "task" metadata field to the right corpus file.
+#      e.g. topic with task="english" → ~/ragtime1/eng-docs.jsonl
+#
+#   2. _load_doc_store(task) reads that JSONL file once and builds a dict:
+#         { doc_id -> doc_text }
+#      The result is stored in the module-level _doc_store_cache dict so the
+#      1.6GB file is only read ONCE per process, no matter how many responses
+#      need documents. Subsequent calls for the same task hit the in-memory
+#      dict instantly (RAM lookup, nanoseconds vs disk I/O).
+#      NOTE: this cache lives only in RAM — it disappears when the process ends.
+#      That is fine because the expensive work (NLI scores, LLM calls) is
+#      separately persisted to disk via load_cache/save_cache.
+#
+#   3. _inject_documents(responses) iterates over all Report objects. For any
+#      response that already has documents (anise-style), it does nothing.
+#      For adventure-style responses with empty documents, it collects all
+#      cited doc IDs from fragment.citations, looks them up in the store,
+#      and injects _Doc stubs with a .text attribute — matching the interface
+#      the rest of the code expects (doc.text).
+
+# Path to the corpus directory (outside auto-judge-starter-kit)
+_DOCS_DIR = os.path.expanduser("~/ragtime1")
+
+# Map task name → corpus file path
+_TASK_TO_CORPUS: Dict[str, str] = {
+    "english": os.path.join(_DOCS_DIR, "eng-docs.jsonl"),
+    "arabic":  os.path.join(_DOCS_DIR, "arb-docs.jsonl"),
+    "russian": os.path.join(_DOCS_DIR, "rus-docs.jsonl"),
+    "chinese": os.path.join(_DOCS_DIR, "zho-docs.jsonl"),
+}
+
+# Module-level in-memory cache: task -> {doc_id -> doc_text}
+# Populated lazily on first call per task, reused for all subsequent calls.
+_doc_store_cache: Dict[str, Dict[str, str]] = {}
+
+
+def _load_doc_store(task: str) -> Dict[str, str]:
+    """
+    Load and return the document corpus for a given task language.
+    Args:
+        task: value of metadata.task, e.g. "english", "arabic", etc.
+
+    Returns:
+        dict mapping doc_id -> doc_text (empty dict if corpus not found)
+    """
+    # Return immediately if already loaded for this task
+    if task in _doc_store_cache:
+        return _doc_store_cache[task]
+
+    # Default to english if task not recognised
+    path = _TASK_TO_CORPUS.get(task, _TASK_TO_CORPUS["english"])
+
+    store: Dict[str, str] = {}
+    if not os.path.exists(path):
+        print(f"WARNING _load_doc_store: corpus file not found at {path} (task={task!r})")
+        _doc_store_cache[task] = store
+        return store
+
+    print(f"_load_doc_store: loading corpus for task={task!r} from {path} ...")
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            doc = json.loads(line)
+            store[doc["id"]] = doc["text"]
+
+    print(f"_load_doc_store: loaded {len(store):,} docs for task={task!r} (now cached in RAM)")
+    _doc_store_cache[task] = store
+    return store
+
+
+class _Doc:
+    """
+    Minimal document stub that matches the interface the judge code expects.
+    The original anise Report objects had autojudge_base Document instances
+    with a .text attribute. We replicate just that attribute so all existing
+    doc.text accesses work unchanged.
+    """
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+def _inject_documents(responses: List[Report]) -> None:
+    """
+    Populate response.documents for adventure-style runs that don't embed
+    document text in the Report object.
+
+    For each response:
+      - If response.documents is already populated (anise-style): skip (no-op).
+      - If response.documents is empty/None (adventure-style): collect all
+        doc IDs cited across all fragments, look them up in the corpus store,
+        and inject _Doc stubs into response.documents.
+
+    This must be called once after responses = list(rag_responses) and before
+    any scoring stage that accesses response.documents.
+    """
+    injected_count = 0
+    missing_ids: List[str] = []
+
+    for response in responses:
+        # Already populated — anise-style run, nothing to do
+        if response.documents:
+            continue
+
+        task = getattr(response.metadata, "task", "english") or "english"
+        store = _load_doc_store(task)
+        if not store:
+            continue
+
+        # Collect all doc IDs cited in this response's fragments.
+        # Citations are dicts {doc_id: retrieval_score} in adventure format.
+        # We only need the keys (doc IDs) — the float score is the BM25/retrieval
+        # ranking score from the RAG system, not used in our NLI scoring.
+        cited_ids = list({
+            cid
+            for frag in (response.responses or [])
+            for cid in (frag.citations or {}).keys()
+        })
+
+        # Build documents dict: {doc_id -> _Doc(text)}
+        # Log any IDs not found in the corpus (shouldn't happen but good to know)
+        docs = {}
+        for doc_id in cited_ids:
+            if doc_id in store:
+                docs[doc_id] = _Doc(store[doc_id])
+            else:
+                missing_ids.append(doc_id)
+
+        response.documents = docs
+        injected_count += 1
+
+    print(f"_inject_documents: injected documents for {injected_count} responses")
+    if missing_ids:
+        print(f"  WARNING: {len(missing_ids)} cited doc IDs not found in corpus: "
+              f"{missing_ids[:5]}{'...' if len(missing_ids) > 5 else ''}")
+
+
+# =============================================================================
+# NLI Models 
+# =============================================================================
+
 class _VectaraHHEM:
     """Wrapper around HHEMv2 with .predict() matching CrossEncoder interface."""
 
@@ -50,7 +217,6 @@ class _VectaraHHEM:
         scores = []
         for i in range(0, len(sentence_pairs), batch_size):
             batch = sentence_pairs[i:i + batch_size]
-            
             inputs = self._tokenizer(
                 [p[0] for p in batch], [p[1] for p in batch],
                 return_tensors="pt", padding=True, truncation=True,
@@ -95,9 +261,8 @@ MINIMAL_QRELS_SPEC = QrelsSpec[GradeRecord](
 )
 
 
-
 # =============================================================================
-# MinnaNuggetCreator
+# MinnaNuggetCreator 
 # =============================================================================
 
 class MinnaNuggetCreator:
@@ -119,7 +284,7 @@ class MinnaNuggetCreator:
         full_config = dataclasses.replace(full_config, rpm=300, max_attempts=100, max_outstanding=8)
         backend = OpenAIMinimaLlm(full_config)
 
-        # fix2-6: collect diverse response samples to inform nugget generation -- not very effective
+        # collect diverse response samples to inform nugget generation
         responses = list(rag_responses)
         response_samples: Dict[str, List[str]] = {}
         for resp in responses:
@@ -128,7 +293,7 @@ class MinnaNuggetCreator:
             if tid not in response_samples:
                 response_samples[tid] = []
             if len(response_samples[tid]) < 3 and len(text) > 50:
-                response_samples[tid].append(text[:500])  # first 500 chars
+                response_samples[tid].append(text[:500])
 
         banks: List[NuggetBank] = []
         requests = []
@@ -139,7 +304,6 @@ class MinnaNuggetCreator:
             else:
                 context = topic.problem_statement
 
-            # include response samples in nugget prompt -- not very effective
             samples = response_samples.get(topic.request_id, [])
             if samples:
                 sample_text = "\n---\n".join(samples)
@@ -182,7 +346,6 @@ class MinnaNuggetCreator:
                 print(f"  Raw response: {getattr(result, 'text', None)!r:.200}")
                 parsed = []
 
-            # if no nuggets were generated, just grab the question
             if not parsed:
                 fallback_q = topic.problem_statement or topic.title or f"What is the answer to topic {topic.request_id}?"
                 print(f"WARNING: Using fallback nugget for topic {topic.request_id}")
@@ -206,8 +369,8 @@ class MinnaNuggetCreator:
 # =============================================================================
 
 class MinnaQrelsCreator:
-    CACHE_DIR = "output-kiddie"
-    CACHE_TAG = "mission3"
+    CACHE_DIR = "output-rag4report"
+    CACHE_TAG = "rag4report"
     CACHE_PATH = f"{CACHE_DIR}/qrels_grades_cache_{CACHE_TAG}.json"
 
     def create_qrels(
@@ -231,7 +394,6 @@ class MinnaQrelsCreator:
         grade_records: List[GradeRecord] = []
         requests_info: List[Tuple[str, str, str, MinimaLlmRequest]] = []
 
-        # Build LLM requests only for cache misses.
         for response in responses:
             topic_id = response.metadata.topic_id
             run_id = response.metadata.run_id
@@ -270,7 +432,6 @@ class MinnaQrelsCreator:
         if requests_info:
             print(f"MinnaQrelsCreator: Sending {len(requests_info)} LLM grading requests "
                   f"({len(cache)} already cached)...")
-            # Process in chunks so progress is saved if crashes.
             BATCH_SIZE = 5000
             for batch_start in range(0, len(requests_info), BATCH_SIZE):
                 batch = requests_info[batch_start:batch_start + BATCH_SIZE]
@@ -288,7 +449,6 @@ class MinnaQrelsCreator:
                 print(f"  Qrels progress: {min(batch_start + BATCH_SIZE, len(requests_info))}/{len(requests_info)} "
                       f"submitted, {len(cache)} total cached")
 
-    
         max_grade = grade_range[1]
         for response in responses:
             topic_id = response.metadata.topic_id
@@ -303,7 +463,6 @@ class MinnaQrelsCreator:
                 cache.get(f"{run_id}_{topic_id}_{n.question_id}", 0)
                 for n in nuggets
             ]
-            # each nugget scored 0-5; normalize to [0,1]
             avg = sum(tallies) / (len(tallies) * 5.0)
             grade = round(max_grade * avg)
             grade_records.append(GradeRecord(topic_id, text, grade))
@@ -325,7 +484,7 @@ class MinnaQrelsCreator:
 
 
 # =============================================================================
-# Cache helpers
+# Cache helpers 
 # =============================================================================
 
 def load_cache(path):
@@ -338,10 +497,6 @@ def save_cache(data, path):
     with open(path, "w") as f:
         json.dump(data, f)
 
-
-# =============================================================================
-# MinnaLeaderboardJudge
-# =============================================================================
 
 class MinnaLeaderboardJudge:
 
@@ -356,10 +511,9 @@ class MinnaLeaderboardJudge:
     ) -> Leaderboard:
         """Judge RAG responses and produce a leaderboard."""
 
-        # RESPONSE_NUGGET_SCORE. Shares qrels-stage cache 
-      
-        cache_dir = "output-kiddie"
-        cache_tag = "mission3"
+        cache_dir = "output-rag4report"
+        cache_tag = "rag4report"
+
         os.makedirs(cache_dir, exist_ok=True)
         expected_topic_ids: List[str] = [t.request_id for t in rag_topics]
         full_config = MinimaLlmConfig.from_dict(llm_config.raw) if llm_config.raw else MinimaLlmConfig.from_env()
@@ -367,11 +521,15 @@ class MinnaLeaderboardJudge:
         backend = OpenAIMinimaLlm(full_config)
         responses = list(rag_responses)
 
+        # FIX: inject document text into response.documents for adventure-style
+        # runs (rag4reports-2026 format) where documents are not embedded in the
+        # Report object.
+       
+        _inject_documents(responses)
+
         retrieval_cache_path = f"{cache_dir}/retrieval_quality_cache_{cache_tag}.json"
         retrieval_cache = load_cache(retrieval_cache_path)
-        # Each request checks (system, topic, nugget) 
         retrieval_requests: List[Tuple[str, str, str, MinimaLlmRequest]] = []
-
         retrieval_quality: Dict[Tuple[str, str], float] = {}
 
         if nugget_banks:
@@ -385,8 +543,7 @@ class MinnaLeaderboardJudge:
 
                 nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
 
-                # Build a single "retrieval context",
-                # truncate each doc to 1000 chars & cap at 20 docs 
+                # Truncate each doc to 1000 chars & cap at 20 docs
                 doc_texts = []
                 for doc_id, doc in response.documents.items():
                     doc_texts.append(doc.text[:1000])
@@ -397,7 +554,6 @@ class MinnaLeaderboardJudge:
                     if cache_key in retrieval_cache:
                         continue
 
-               
                     retrieval_requests.append((
                         run_id, topic_id, nugget.question_id,
                         MinimaLlmRequest(
@@ -449,7 +605,7 @@ class MinnaLeaderboardJudge:
                     print(f"  RetrievalQuality progress: {min(batch_start + BATCH_SIZE, len(retrieval_requests))}/{len(retrieval_requests)} "
                           f"submitted, {len(retrieval_cache)} total cached")
 
-            # and normalize to 0-1 (max per nugget is 2)
+            # normalize to 0-1 (max per nugget is 2)
             for response in responses:
                 topic_id = response.metadata.topic_id
                 run_id = response.metadata.run_id
@@ -548,7 +704,6 @@ class MinnaLeaderboardJudge:
             save_cache(claims_cache, claims_cache_path)
 
         # ── Stage 2a: Attribution score (claim × all docs, continuous max-pool) ──
-        # get max (claim, doc)
         nli_scores_cache_path = f"{cache_dir}/nli_scores_continuous_{cache_tag}.json"
         nli_scores_cache = load_cache(nli_scores_cache_path)
         score_dict: Dict[Tuple[Tuple[str, str], str], float] = {}
@@ -562,7 +717,6 @@ class MinnaLeaderboardJudge:
             key = (response.metadata.run_id, response.metadata.topic_id)
             for claim in claims.get(key, []):
                 cached_max = 0.0
-                # must check ALL docs to find max.
                 for doc_id, doc in response.documents.items():
                     key_str = f"{key[0]}_{key[1]}_{doc_id}_{claim}"
                     if key_str in nli_scores_cache:
@@ -586,7 +740,6 @@ class MinnaLeaderboardJudge:
                     nli_scores_cache[key_str] = float_score
                     if float_score > score_dict.get((key, claim), 0.0):
                         score_dict[(key, claim)] = float_score
-                # save cache every 10 chunks to avoid losing progress
                 if (i // CHUNK_SIZE) % 10 == 9:
                     save_cache(nli_scores_cache, nli_scores_cache_path)
 
@@ -598,7 +751,6 @@ class MinnaLeaderboardJudge:
 
         cite_pairs: List[Tuple[str, str]] = []
         cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
-
         citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
 
         for response in responses:
@@ -638,7 +790,6 @@ class MinnaLeaderboardJudge:
 
             citation_info[key] = (supported, total_cited)
 
-        # Run deberta NLI 
         if cite_pairs:
             print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
@@ -648,7 +799,7 @@ class MinnaLeaderboardJudge:
                     idx = i + j
                     key, frag_idx = cite_pair_index[idx]
                     cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-                    # entailment must be largest
+                    # entailment class must outscore both neutral and contradiction
                     is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
                     citation_cache[cache_key] = is_supported
                     if is_supported:
@@ -657,8 +808,7 @@ class MinnaLeaderboardJudge:
 
         save_cache(citation_cache, citation_cache_path)
 
-        
-        # ── Build leaderboard───────────────────────────
+        # ── Build leaderboard ──────────────────────────────
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
         for response in responses:
             key = (response.metadata.run_id, response.metadata.topic_id)
@@ -701,7 +851,7 @@ class MinnaLeaderboardJudge:
 
 
 # =============================================================================
-# CLI Entry Point
+# CLI Entry Point 
 # =============================================================================
 
 if __name__ == "__main__":

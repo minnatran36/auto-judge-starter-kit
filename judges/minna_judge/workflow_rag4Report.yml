@@ -8,9 +8,9 @@
 #
 # CompleteExampleJudge demonstrates the modular pattern with three separate classes:
 
-nugget_class: "judges.minna_judge.minna_judge:MinnaNuggetCreator"
-qrels_class: "judges.minna_judge.minna_judge:MinnaQrelsCreator"
-judge_class: "judges.minna_judge.minna_judge:MinnaLeaderboardJudge"
+nugget_class: "judges.minna_judge.minna_judge_rag4Report:MinnaNuggetCreator"
+qrels_class:  "judges.minna_judge.minna_judge_rag4Report:MinnaQrelsCreator"
+judge_class:  "judges.minna_judge.minna_judge_rag4Report:MinnaLeaderboardJudge"
 
 # =============================================================================
 # Lifecycle Flags
@@ -42,7 +42,7 @@ augment_report: false
 # Shared settings passed to all phases. Use {_name} for variant/sweep name.
 
 settings:
-  filebase: "minna_judge_run_final"    # Output filename base
+  filebase: "minna_judge_rag4report"    # Output filename base
 
 
 # =============================================================================
