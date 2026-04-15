@@ -768,12 +768,19 @@ class MinnaLeaderboardJudge:
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
         # ── Stage 2b: Citation accuracy ────
-        citation_cache_path = f"{cache_dir}/citation_deberta_cache_{cache_tag}.json"
+        # FIX: renamed cache to v2 — old cache has wrong 0s from bugs below
+        citation_cache_path = f"{cache_dir}/citation_deberta_v2_cache_{cache_tag}.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
         cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
         citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
+
+        # Max chars of doc text to feed to DeBERTa NLI.  The tokenizer
+        # truncates to ~512 tokens anyway, but feeding megabytes of text
+        # wastes memory and guarantees the relevant passage is cut off.
+        # 1500 chars ≈ 350-400 tokens — leaves room for the fragment.
+        _CITE_DOC_MAX_CHARS = 1500
 
         for response in responses:
             if not response.responses:
@@ -787,6 +794,9 @@ class MinnaLeaderboardJudge:
             for frag_idx, fragment in enumerate(response.responses):
                 cited_ids = []
                 if fragment.citations:
+                    # Both formats contain valid doc ID strings:
+                    #   dict: {doc_id: score}  (adventure-continue style)
+                    #   list: [doc_id, ...]     (apparent-defendant style)
                     if isinstance(fragment.citations, dict):
                         cited_ids = list(fragment.citations.keys())
                     elif isinstance(fragment.citations, list):
@@ -803,17 +813,32 @@ class MinnaLeaderboardJudge:
                         supported += 1
                     continue
 
+                # FIX 3: check ALL cited docs (not just the first).
+                # Collect (truncated_doc_text, frag_text) pairs for every
+                # cited doc that exists. We'll score them all and count
+                # the fragment as supported if ANY cited doc entails it.
                 frag_text = fragment.text
+                added_any = False
                 for cid in cited_ids:
                     if cid in docs:
-                        cite_pairs.append((docs[cid].text, frag_text))
+                        # FIX 2: truncate doc text so DeBERTa sees a
+                        # manageable premise instead of a huge document
+                        doc_text = docs[cid].text[:_CITE_DOC_MAX_CHARS]
+                        cite_pairs.append((doc_text, frag_text))
                         cite_pair_index.append((key, frag_idx))
-                        break
+                        added_any = True
+
+                # If none of the cited IDs were found in docs, this
+                # fragment can never be supported — don't count it.
+                if not added_any:
+                    total_cited -= 1
 
             citation_info[key] = (supported, total_cited)
 
         if cite_pairs:
             print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
+            # Track per-fragment best result (supported if ANY cited doc entails)
+            frag_supported: Dict[str, int] = {}
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
                 chunk_scores = citation_nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
                 print(f"  Citation NLI (deberta): {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
@@ -822,11 +847,40 @@ class MinnaLeaderboardJudge:
                     key, frag_idx = cite_pair_index[idx]
                     cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
                     # entailment class must outscore both neutral and contradiction
-                    is_supported = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
-                    citation_cache[cache_key] = is_supported
-                    if is_supported:
-                        prev_sup, prev_total = citation_info[key]
-                        citation_info[key] = (prev_sup + 1, prev_total)
+                    is_entail = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
+                    # Keep best across all cited docs for this fragment
+                    frag_supported[cache_key] = max(frag_supported.get(cache_key, 0), is_entail)
+
+            # Write per-fragment results to cache
+            for cache_key, is_supported in frag_supported.items():
+                citation_cache[cache_key] = is_supported
+
+            # Re-scan all responses to rebuild citation_info from cache
+            for response in responses:
+                if not response.responses:
+                    continue
+                key = (response.metadata.run_id, response.metadata.topic_id)
+                if key not in citation_info:
+                    continue
+                sup = 0
+                total = 0
+                resp_docs = response.documents or {}
+                for frag_idx, fragment in enumerate(response.responses):
+                    if not fragment.citations:
+                        continue
+                    if isinstance(fragment.citations, dict):
+                        cids = list(fragment.citations.keys())
+                    elif isinstance(fragment.citations, list):
+                        cids = [str(c) for c in fragment.citations]
+                    else:
+                        continue
+                    if not cids or not any(cid in resp_docs for cid in cids):
+                        continue
+                    total += 1
+                    ck = f"{key[0]}_{key[1]}_{frag_idx}"
+                    if citation_cache.get(ck, 0) == 1:
+                        sup += 1
+                citation_info[key] = (sup, total)
 
         save_cache(citation_cache, citation_cache_path)
 
