@@ -93,32 +93,13 @@ _TASK_TO_CORPUS: Dict[str, str] = {
 _doc_store_cache: Dict[str, Dict[str, str]] = {}
 
 
-def _load_doc_store(task: str) -> Dict[str, str]:
-    """
-    Load and return the document corpus for a given task language.
-    Reads the JSONL file only once per task per process — subsequent calls
-    return the already-loaded dict from _doc_store_cache (RAM, instant).
-
-    Args:
-        task: value of metadata.task, e.g. "english", "arabic", etc.
-
-    Returns:
-        dict mapping doc_id -> doc_text (empty dict if corpus not found)
-    """
-    # Return immediately if already loaded for this task
-    if task in _doc_store_cache:
-        return _doc_store_cache[task]
-
-    # Default to english if task not recognised
-    path = _TASK_TO_CORPUS.get(task, _TASK_TO_CORPUS["english"])
-
+def _load_single_corpus(path: str) -> Dict[str, str]:
+    """Load one JSONL corpus file into a dict {doc_id -> doc_text}."""
     store: Dict[str, str] = {}
     if not os.path.exists(path):
-        print(f"WARNING _load_doc_store: corpus file not found at {path} (task={task!r})")
-        _doc_store_cache[task] = store
+        print(f"WARNING _load_single_corpus: file not found at {path}")
         return store
-
-    print(f"_load_doc_store: loading corpus for task={task!r} from {path} ...")
+    print(f"_load_single_corpus: loading {path} ...")
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -126,9 +107,42 @@ def _load_doc_store(task: str) -> Dict[str, str]:
                 continue
             doc = json.loads(line)
             store[doc["id"]] = doc["text"]
+    print(f"_load_single_corpus: loaded {len(store):,} docs from {path}")
+    return store
 
-    print(f"_load_doc_store: loaded {len(store):,} docs for task={task!r} (now cached in RAM)")
-    _doc_store_cache[task] = store
+
+def _load_doc_store(task: str) -> Dict[str, str]:
+    """
+    Load and return the document corpus for a given task language.
+    Reads the JSONL file(s) only once per task per process — subsequent
+    calls return the already-loaded dict from _doc_store_cache (RAM).
+
+    For task="multilingual" (or any unrecognised task), loads ALL four
+    corpora (eng + arb + rus + zho) and merges them, since multilingual
+    responses can cite docs from any language.
+    """
+    # Normalise: the framework may pass an enum (TaskType.ENGLISH) rather
+    # than a plain string — convert to lowercase string for dict lookup.
+    task_str = str(task).lower()
+    # Handle enum values like "TaskType.ENGLISH" → "english"
+    if "." in task_str:
+        task_str = task_str.split(".")[-1]
+
+    if task_str in _doc_store_cache:
+        return _doc_store_cache[task_str]
+
+    if task_str in _TASK_TO_CORPUS:
+        # Single-language task: load just that corpus
+        store = _load_single_corpus(_TASK_TO_CORPUS[task_str])
+    else:
+        # "multilingual" or unknown: load ALL corpora and merge
+        print(f"_load_doc_store: task={task!r} → loading ALL corpora")
+        store: Dict[str, str] = {}
+        for _, path in _TASK_TO_CORPUS.items():
+            store.update(_load_single_corpus(path))
+        print(f"_load_doc_store: merged {len(store):,} total docs for task={task!r}")
+
+    _doc_store_cache[task_str] = store
     return store
 
 
@@ -587,11 +601,12 @@ class MinnaLeaderboardJudge:
 
                 nuggets = nugget_banks.banks[topic_id].nuggets_as_list()
 
-                # Truncate each doc to 1000 chars & cap at 20 docs
+                # Truncate each doc to 3000 chars & cap at 15 docs
+                # (median doc is ~2400 chars; 1000 only shows headline)
                 doc_texts = []
                 for doc_id, doc in response.documents.items():
-                    doc_texts.append(doc.text[:1000])
-                combined_docs = "\n---\n".join(doc_texts[:20])
+                    doc_texts.append(doc.text[:3000])
+                combined_docs = "\n---\n".join(doc_texts[:15])
 
                 for nugget in nuggets:
                     cache_key = f"{run_id}_{topic_id}_{nugget.question_id}"
@@ -767,36 +782,36 @@ class MinnaLeaderboardJudge:
 
         save_cache(nli_scores_cache, nli_scores_cache_path)
 
-        # ── Stage 2b: Citation accuracy ────
-        # FIX: renamed cache to v2 — old cache has wrong 0s from bugs below
-        citation_cache_path = f"{cache_dir}/citation_deberta_v2_cache_{cache_tag}.json"
+        # ── Stage 2b: Citation accuracy (HHEM, continuous max-pool) ──
+        # Uses the same HHEM model as attribution. For each fragment that
+        # has citations, score (cited_doc, fragment) for ALL cited docs and
+        # keep the max HHEM score.  Per-response citation accuracy is the
+        # mean of these max scores across all cited fragments (continuous,
+        # no binary threshold).
+        #
+        # Cache v3: new name because v1 used DeBERTa binary, v2 used
+        # DeBERTa binary with truncation — both incompatible with HHEM
+        # continuous scores stored here.
+        citation_cache_path = f"{cache_dir}/citation_hhem_v3_cache_{cache_tag}.json"
         citation_cache = load_cache(citation_cache_path)
 
         cite_pairs: List[Tuple[str, str]] = []
-        cite_pair_index: List[Tuple[Tuple[str, str], int]] = []
-        citation_info: Dict[Tuple[str, str], Tuple[int, int]] = {}
-
-        # Max chars of doc text to feed to DeBERTa NLI.  The tokenizer
-        # truncates to ~512 tokens anyway, but feeding megabytes of text
-        # wastes memory and guarantees the relevant passage is cut off.
-        # 1500 chars ≈ 350-400 tokens — leaves room for the fragment.
-        _CITE_DOC_MAX_CHARS = 1500
+        cite_pair_index: List[Tuple[Tuple[str, str], int, str]] = []  # (key, frag_idx, doc_id)
+        # Per-fragment max HHEM score: {(run_id, topic_id, frag_idx) -> float}
+        frag_max_score: Dict[str, float] = {}
+        # Which (run,topic) keys have cited fragments
+        cite_frag_keys: Dict[Tuple[str, str], List[str]] = {}
 
         for response in responses:
             if not response.responses:
                 continue
             key = (response.metadata.run_id, response.metadata.topic_id)
             docs = response.documents or {}
-
-            supported = 0
-            total_cited = 0
+            frag_cache_keys: List[str] = []
 
             for frag_idx, fragment in enumerate(response.responses):
                 cited_ids = []
                 if fragment.citations:
-                    # Both formats contain valid doc ID strings:
-                    #   dict: {doc_id: score}  (adventure-continue style)
-                    #   list: [doc_id, ...]     (apparent-defendant style)
                     if isinstance(fragment.citations, dict):
                         cited_ids = list(fragment.citations.keys())
                     elif isinstance(fragment.citations, list):
@@ -805,84 +820,57 @@ class MinnaLeaderboardJudge:
                 if not cited_ids:
                     continue
 
-                total_cited += 1
-                cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+                frag_cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+                cached_max = 0.0
+                need_score = False
 
-                if cache_key in citation_cache:
-                    if citation_cache[cache_key] == 1:
-                        supported += 1
-                    continue
-
-                # FIX 3: check ALL cited docs (not just the first).
-                # Collect (truncated_doc_text, frag_text) pairs for every
-                # cited doc that exists. We'll score them all and count
-                # the fragment as supported if ANY cited doc entails it.
-                frag_text = fragment.text
-                added_any = False
                 for cid in cited_ids:
-                    if cid in docs:
-                        # FIX 2: truncate doc text so DeBERTa sees a
-                        # manageable premise instead of a huge document
-                        doc_text = docs[cid].text[:_CITE_DOC_MAX_CHARS]
-                        cite_pairs.append((doc_text, frag_text))
-                        cite_pair_index.append((key, frag_idx))
-                        added_any = True
+                    if cid not in docs:
+                        continue
+                    pair_key = f"{key[0]}_{key[1]}_{frag_idx}_{cid}"
+                    if pair_key in citation_cache:
+                        cached_max = max(cached_max, float(citation_cache[pair_key]))
+                    else:
+                        cite_pairs.append((docs[cid].text, fragment.text))
+                        cite_pair_index.append((key, frag_idx, cid))
+                        need_score = True
 
-                # If none of the cited IDs were found in docs, this
-                # fragment can never be supported — don't count it.
-                if not added_any:
-                    total_cited -= 1
+                # Only count this fragment if at least one cited doc exists
+                if cached_max > 0.0 or need_score or any(cid in docs for cid in cited_ids):
+                    frag_max_score[frag_cache_key] = cached_max
+                    frag_cache_keys.append(frag_cache_key)
 
-            citation_info[key] = (supported, total_cited)
+            if frag_cache_keys:
+                cite_frag_keys[key] = frag_cache_keys
 
         if cite_pairs:
-            print(f"Citation NLI (deberta): {len(cite_pairs)} pairs", flush=True)
-            # Track per-fragment best result (supported if ANY cited doc entails)
-            frag_supported: Dict[str, int] = {}
+            print(f"Citation HHEM: {len(cite_pairs)} pairs to score on {nli_model._device}", flush=True)
             for i in range(0, len(cite_pairs), CHUNK_SIZE):
-                chunk_scores = citation_nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
-                print(f"  Citation NLI (deberta): {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
-                for j, score in enumerate(chunk_scores):
+                chunk_scores = nli_model.predict(cite_pairs[i:i + CHUNK_SIZE])
+                print(f"  Citation HHEM: {min(i + CHUNK_SIZE, len(cite_pairs))}/{len(cite_pairs)} done", flush=True)
+                for j, sc in enumerate(chunk_scores):
                     idx = i + j
-                    key, frag_idx = cite_pair_index[idx]
-                    cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
-                    # entailment class must outscore both neutral and contradiction
-                    is_entail = 1 if (score[1] > score[0] and score[1] > score[2]) else 0
-                    # Keep best across all cited docs for this fragment
-                    frag_supported[cache_key] = max(frag_supported.get(cache_key, 0), is_entail)
-
-            # Write per-fragment results to cache
-            for cache_key, is_supported in frag_supported.items():
-                citation_cache[cache_key] = is_supported
-
-            # Re-scan all responses to rebuild citation_info from cache
-            for response in responses:
-                if not response.responses:
-                    continue
-                key = (response.metadata.run_id, response.metadata.topic_id)
-                if key not in citation_info:
-                    continue
-                sup = 0
-                total = 0
-                resp_docs = response.documents or {}
-                for frag_idx, fragment in enumerate(response.responses):
-                    if not fragment.citations:
-                        continue
-                    if isinstance(fragment.citations, dict):
-                        cids = list(fragment.citations.keys())
-                    elif isinstance(fragment.citations, list):
-                        cids = [str(c) for c in fragment.citations]
-                    else:
-                        continue
-                    if not cids or not any(cid in resp_docs for cid in cids):
-                        continue
-                    total += 1
-                    ck = f"{key[0]}_{key[1]}_{frag_idx}"
-                    if citation_cache.get(ck, 0) == 1:
-                        sup += 1
-                citation_info[key] = (sup, total)
+                    key, frag_idx, cid = cite_pair_index[idx]
+                    pair_key = f"{key[0]}_{key[1]}_{frag_idx}_{cid}"
+                    float_sc = float(sc)
+                    citation_cache[pair_key] = float_sc
+                    frag_cache_key = f"{key[0]}_{key[1]}_{frag_idx}"
+                    if float_sc > frag_max_score.get(frag_cache_key, 0.0):
+                        frag_max_score[frag_cache_key] = float_sc
+                if (i // CHUNK_SIZE) % 10 == 9:
+                    save_cache(citation_cache, citation_cache_path)
 
         save_cache(citation_cache, citation_cache_path)
+
+        # Aggregate: mean of max-HHEM per cited fragment
+        citation_accuracy: Dict[Tuple[str, str], float] = {}
+        for resp_key, fck_list in cite_frag_keys.items():
+            if fck_list:
+                citation_accuracy[resp_key] = sum(
+                    frag_max_score.get(fck, 0.0) for fck in fck_list
+                ) / len(fck_list)
+            else:
+                citation_accuracy[resp_key] = 0.0
 
         # ── Build leaderboard ──────────────────────────────
         builder: LeaderboardBuilder = LeaderboardBuilder(MINIMAL_SPEC)
@@ -896,8 +884,7 @@ class MinnaLeaderboardJudge:
             else:
                 attribution = 0.0
 
-            cite_sup, cite_total = citation_info.get(key, (0, 0))
-            cite_acc = cite_sup / cite_total if cite_total > 0 else 0.0
+            cite_acc = citation_accuracy.get(key, 0.0)
 
             ret_qual = retrieval_quality.get(key, 0.0)
 
