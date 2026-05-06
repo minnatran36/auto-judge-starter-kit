@@ -14,3 +14,11 @@ output-kiddie/
 
 # generated outputs (do not track)
 /data/kiddie/runs/repgen/
+minna_venv/
+*.egg-info/
+nohup.out
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.eval.txt
+output-*/

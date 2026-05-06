@@ -1,0 +1,8 @@
+minna_venv/
+*.egg-info/
+nohup.out
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.eval.txt
+output-*/
